@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Code Agent Harness</title>
+    <link rel="stylesheet" href="./styles.css?v=20260830-1518" />
+  </head>
+  <body>
+    <main class="app">
+      <aside class="sidebar">
+        <div class="brand">
+          <h1>Code Agent</h1>
+          <span id="status" class="status">ready</span>
+        </div>
+
+        <label for="workspace">Workspace</label>
+        <input id="workspace" value="workspace" />
+
+        <div class="side-head">
+          <h2>Files</h2>
+          <button id="refresh" type="button" title="刷新文件列表">Refresh</button>
+        </div>
+        <ol id="files" class="files">
+          <li class="empty">No files yet</li>
+        </ol>
+      </aside>
+
+      <section class="editor">
+        <div class="editor-head">
+          <div>
+            <p class="eyebrow">Editor</p>
+            <h2 id="file-title">No file selected</h2>
+          </div>
+          <div class="editor-actions">
+            <span id="language" class="pill">Text</span>
+            <button id="save-file" type="button" disabled>Save</button>
+            <button id="run-file" type="button" disabled>Run File</button>
+          </div>
+        </div>
+        <textarea id="code-editor" class="code-editor" spellcheck="false" disabled>// Choose a file from the left to edit it.</textarea>
+        <pre id="terminal" class="terminal">No file command has run yet.</pre>
+      </section>
+
+      <aside class="agent-panel">
+        <div class="agent-head">
+          <div>
+            <p class="eyebrow">Agent</p>
+            <h2>Chat</h2>
+          </div>
+          <button id="clear" type="button" title="清空对话">Clear</button>
+        </div>
+        <ol id="events" class="events">
+          <li class="empty">Ask the agent to change code in this workspace.</li>
+        </ol>
+        <section class="composer">
+          <textarea id="task">Create a hello world Python script and run it.</textarea>
+          <button id="run" class="run" type="button">Run</button>
+        </section>
+      </aside>
+    </main>
+    <script src="./app.js?v=20260830-1518"></script>
+  </body>
+</html>

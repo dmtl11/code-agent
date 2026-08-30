@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+config/llm.env
+workspace/
+demo_workspace/
+web_demo_workspace/
+codex_like_workspace/
+llm_only_workspace/
+live_workspace/
