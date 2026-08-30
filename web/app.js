@@ -12,11 +12,26 @@ const languageEl = document.querySelector("#language");
 const saveFileButton = document.querySelector("#save-file");
 const runFileButton = document.querySelector("#run-file");
 const terminalEl = document.querySelector("#terminal");
+const modeButtons = document.querySelectorAll("#mode-switch [data-mode]");
+const contextStatusEl = document.querySelector("#context-status");
 let activeFile = "";
 let openFileRequestId = 0;
+let activeMode = "code";
+let conversationHistory = [];
 
 clearButton.addEventListener("click", () => {
   eventsEl.innerHTML = '<li class="empty">Ask the agent to change code in this workspace.</li>';
+  conversationHistory = [];
+  contextStatusEl.textContent = "Context ready";
+});
+
+modeButtons.forEach((button) => {
+  button.addEventListener("click", () => {
+    activeMode = button.dataset.mode;
+    modeButtons.forEach((item) => item.classList.toggle("active", item === button));
+    taskEl.placeholder = modePlaceholder(activeMode);
+    runButton.textContent = activeMode === "context" ? "Inspect" : "Run";
+  });
 });
 
 refreshButton.addEventListener("click", refreshFiles);
@@ -29,24 +44,32 @@ saveFileButton.addEventListener("click", saveActiveFile);
 runFileButton.addEventListener("click", runActiveFile);
 
 runButton.addEventListener("click", async () => {
+  const task = taskEl.value.trim() || modePlaceholder(activeMode);
   statusEl.textContent = "running";
   runButton.disabled = true;
-  eventsEl.innerHTML = "";
-  addEvent({ type: "user", content: taskEl.value });
+  removeEmptyEvent();
+  addEvent({ type: "user", content: task });
+  taskEl.value = "";
 
   try {
     const response = await fetch("/api/run-stream", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        task: taskEl.value,
+        task,
         workspace: workspaceEl.value,
+        mode: activeMode,
+        history: conversationHistory,
       }),
     });
     if (!response.ok || !response.body) {
       throw new Error(`HTTP ${response.status}`);
     }
-    await readEventStream(response.body);
+    const finalEvent = await readEventStream(response.body);
+    if (finalEvent?.ok && Array.isArray(finalEvent.exchange)) {
+      conversationHistory.push(...finalEvent.exchange);
+      conversationHistory = conversationHistory.slice(-20);
+    }
     statusEl.textContent = "done";
     await refreshFiles();
   } catch (error) {
@@ -63,6 +86,7 @@ async function readEventStream(body) {
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
+  let finalEvent = null;
 
   while (true) {
     const { value, done } = await reader.read();
@@ -74,11 +98,17 @@ async function readEventStream(body) {
       if (!line.trim()) continue;
       const event = JSON.parse(line);
       addEvent(event);
+      if (event.type === "final") finalEvent = event;
       if (event.type === "final" && !event.ok) statusEl.textContent = "error";
     }
   }
 
-  if (buffer.trim()) addEvent(JSON.parse(buffer));
+  if (buffer.trim()) {
+    const event = JSON.parse(buffer);
+    addEvent(event);
+    if (event.type === "final") finalEvent = event;
+  }
+  return finalEvent;
 }
 
 async function refreshFiles() {
@@ -215,6 +245,13 @@ function renderActiveFile() {
 }
 
 function addEvent(event) {
+  if (event.type === "context") {
+    const used = formatTokens(event.estimated_tokens || 0);
+    const max = formatTokens(event.max_tokens || 0);
+    const compacted = event.compacted_blocks ? ` · compacted ${event.compacted_blocks}` : "";
+    contextStatusEl.textContent = `Context ${used} / ${max}${compacted}`;
+    return;
+  }
   if (!shouldDisplayEvent(event)) return;
   const item = document.createElement("li");
   const pre = document.createElement("pre");
@@ -225,6 +262,22 @@ function addEvent(event) {
   item.append(title, pre);
   eventsEl.append(item);
   eventsEl.scrollTop = eventsEl.scrollHeight;
+}
+
+function removeEmptyEvent() {
+  eventsEl.querySelectorAll(".empty").forEach((item) => item.remove());
+}
+
+function modePlaceholder(mode) {
+  if (mode === "ask") return "Ask a question about this repository.";
+  if (mode === "architect") return "Describe the change you want planned.";
+  if (mode === "context") return "Show the repository map and retained context.";
+  return "Describe a coding task for the agent.";
+}
+
+function formatTokens(value) {
+  if (value < 1000) return String(value);
+  return `${(value / 1000).toFixed(1)}k`;
 }
 
 function shouldDisplayEvent(event) {

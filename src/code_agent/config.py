@@ -15,6 +15,8 @@ class LLMConfig:
     model: str
     api_key: str
     env_file: Path
+    context_tokens: int
+    repo_map_chars: int
 
 
 def load_llm_config(env_file: str | os.PathLike[str] | None = None) -> LLMConfig:
@@ -34,7 +36,27 @@ def load_llm_config(env_file: str | os.PathLike[str] | None = None) -> LLMConfig
         or ""
     )
 
-    return LLMConfig(base_url=base_url.rstrip("/"), model=model, api_key=api_key, env_file=path)
+    context_tokens = _read_int("CODE_AGENT_CONTEXT_TOKENS", values, 16000, minimum=4000)
+    repo_map_chars = _read_int("CODE_AGENT_REPO_MAP_CHARS", values, 6000, minimum=800)
+
+    return LLMConfig(
+        base_url=base_url.rstrip("/"),
+        model=model,
+        api_key=api_key,
+        env_file=path,
+        context_tokens=context_tokens,
+        repo_map_chars=repo_map_chars,
+    )
+
+
+def _read_int(key: str, values: dict[str, str], default: int, minimum: int) -> int:
+    raw = os.getenv(key) or values.get(key)
+    if raw is None:
+        return default
+    try:
+        return max(minimum, int(raw))
+    except ValueError:
+        return default
 
 
 def _read_env_file(path: Path) -> dict[str, str]:
@@ -52,4 +74,3 @@ def _read_env_file(path: Path) -> dict[str, str]:
         if key:
             values[key] = value
     return values
-

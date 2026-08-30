@@ -1,0 +1,33 @@
+[
+  {
+    "id": "create_functions",
+    "task": "Create calc.py with add(a, b) and multiply(a, b), then verify both functions from the command line.",
+    "checks": [
+      {"type": "file_exists", "path": "calc.py"},
+      {"type": "command", "command": "python -c \"from calc import add, multiply; assert add(2, 3) == 5; assert multiply(4, 5) == 20; print('ok')\""}
+    ]
+  },
+  {
+    "id": "fix_bug",
+    "seed_files": {
+      "stats.py": "def average(values):\n    return sum(values) / len(values)\n",
+      "test_stats.py": "from stats import average\n\nassert average([2, 4, 6]) == 4\nassert average([]) == 0\nprint('ok')\n"
+    },
+    "task": "Fix the bug in stats.py so test_stats.py passes. Keep the public function name unchanged.",
+    "checks": [
+      {"type": "command", "command": "python test_stats.py"}
+    ]
+  },
+  {
+    "id": "respect_existing_files",
+    "seed_files": {
+      "README.md": "# Demo Project\n\nKeep this sentence unchanged.\n"
+    },
+    "task": "Add a Python file named greet.py that prints hello, but do not modify README.md.",
+    "checks": [
+      {"type": "file_exists", "path": "greet.py"},
+      {"type": "file_contains", "path": "README.md", "text": "Keep this sentence unchanged."},
+      {"type": "command", "command": "python greet.py"}
+    ]
+  }
+]

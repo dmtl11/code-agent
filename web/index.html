@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Code Agent Harness</title>
-    <link rel="stylesheet" href="./styles.css?v=20260830-1518" />
+    <link rel="stylesheet" href="./styles.css?v=20260830-1700" />
   </head>
   <body>
     <main class="app">
@@ -48,8 +48,15 @@
             <p class="eyebrow">Agent</p>
             <h2>Chat</h2>
           </div>
+          <div id="mode-switch" class="mode-switch" role="group" aria-label="Agent mode">
+            <button type="button" class="active" data-mode="code" title="编辑并验证代码">Code</button>
+            <button type="button" data-mode="ask" title="只读问答">Ask</button>
+            <button type="button" data-mode="architect" title="只生成实施计划">Plan</button>
+            <button type="button" data-mode="context" title="查看当前仓库上下文">Context</button>
+          </div>
           <button id="clear" type="button" title="清空对话">Clear</button>
         </div>
+        <div id="context-status" class="context-status">Context ready</div>
         <ol id="events" class="events">
           <li class="empty">Ask the agent to change code in this workspace.</li>
         </ol>
@@ -59,6 +66,6 @@
         </section>
       </aside>
     </main>
-    <script src="./app.js?v=20260830-1518"></script>
+    <script src="./app.js?v=20260830-1700"></script>
   </body>
 </html>

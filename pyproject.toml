@@ -6,6 +6,7 @@ requires-python = ">=3.10"
 
 [project.scripts]
 code-agent = "code_agent.cli:main"
+code-agent-eval = "code_agent.eval:main"
 
 [build-system]
 requires = ["setuptools>=68"]

@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import shutil
+import subprocess
 import urllib.parse
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
 from .agent import CodingAgent
-from .tools import LocalTools
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -67,7 +69,13 @@ class DemoHandler(SimpleHTTPRequestHandler):
             return
 
         task = str(payload.get("task") or "Create a hello world Python script and run it.")
-        workspace = ROOT / str(payload.get("workspace") or "workspace")
+        mode = str(payload.get("mode") or "code")
+        history = payload.get("history") if isinstance(payload.get("history"), list) else []
+        try:
+            workspace = self._resolve_workspace(str(payload.get("workspace") or "workspace"))
+        except ValueError as exc:
+            self._json({"ok": False, "error": str(exc)}, status=400)
+            return
 
         self.send_response(200)
         self.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
@@ -78,8 +86,17 @@ class DemoHandler(SimpleHTTPRequestHandler):
             self._write_ndjson(event)
 
         try:
-            final = CodingAgent(workspace, sink=emit).run(task)
-            self._write_ndjson({"type": "final", "ok": True, "content": final, "workspace": str(workspace)})
+            agent = CodingAgent(workspace, sink=emit, mode=mode)
+            final = agent.run(task, history=history)
+            self._write_ndjson(
+                {
+                    "type": "final",
+                    "ok": True,
+                    "content": final,
+                    "workspace": str(workspace),
+                    "exchange": agent.last_exchange,
+                }
+            )
         except Exception as exc:
             self._write_ndjson({"type": "error", "message": f"{type(exc).__name__}: {exc}"})
             self._write_ndjson({"type": "final", "ok": False, "content": str(exc), "workspace": str(workspace)})
@@ -87,7 +104,7 @@ class DemoHandler(SimpleHTTPRequestHandler):
     def _save_file(self) -> None:
         try:
             payload = self._read_json_body()
-            workspace = ROOT / str(payload.get("workspace") or "workspace")
+            workspace = self._resolve_workspace(str(payload.get("workspace") or "workspace"))
             raw_path = str(payload["path"])
             content = str(payload.get("content", ""))
             root = workspace.resolve()
@@ -103,12 +120,10 @@ class DemoHandler(SimpleHTTPRequestHandler):
     def _run_file(self) -> None:
         try:
             payload = self._read_json_body()
-            workspace = ROOT / str(payload.get("workspace") or "workspace")
+            workspace = self._resolve_workspace(str(payload.get("workspace") or "workspace"))
             raw_path = str(payload["path"])
-            self._resolve_workspace_path(workspace, raw_path)
-            safe_path = raw_path.replace('"', '\\"')
-            result = LocalTools(workspace).call("run_command", {"command": f'python "{safe_path}"', "timeout": 20})
-            self._json({"ok": result.ok, "output": result.output})
+            path = self._resolve_workspace_path(workspace, raw_path)
+            self._json(self._execute_source_file(workspace.resolve(), path))
         except Exception as exc:
             self._json({"ok": False, "error": str(exc)}, status=500)
 
@@ -116,8 +131,8 @@ class DemoHandler(SimpleHTTPRequestHandler):
         parsed = urllib.parse.urlparse(self.path)
         if parsed.path == "/api/files":
             params = urllib.parse.parse_qs(parsed.query)
-            workspace = ROOT / str(params.get("workspace", ["workspace"])[0])
             try:
+                workspace = self._resolve_workspace(str(params.get("workspace", ["workspace"])[0]))
                 self._json({"ok": True, "files": self._list_workspace_files(workspace)})
             except Exception as exc:
                 self._json({"ok": False, "error": str(exc)}, status=500)
@@ -125,9 +140,9 @@ class DemoHandler(SimpleHTTPRequestHandler):
 
         if parsed.path == "/api/file":
             params = urllib.parse.parse_qs(parsed.query)
-            workspace = ROOT / str(params.get("workspace", ["workspace"])[0])
             raw_path = str(params.get("path", [""])[0])
             try:
+                workspace = self._resolve_workspace(str(params.get("workspace", ["workspace"])[0]))
                 path = self._resolve_workspace_path(workspace, raw_path)
                 self._json({"ok": True, "path": raw_path, "content": path.read_text(encoding="utf-8")})
             except Exception as exc:
@@ -160,6 +175,68 @@ class DemoHandler(SimpleHTTPRequestHandler):
         self.wfile.write(data)
         self.wfile.flush()
 
+    def _execute_source_file(self, workspace: Path, path: Path) -> dict[str, Any]:
+        suffix = path.suffix.lower()
+        rel_path = path.relative_to(workspace)
+        if suffix == ".py":
+            return self._run_process(["python", str(rel_path)], workspace, "python")
+        if suffix in {".cpp", ".cc", ".cxx"}:
+            compiler = shutil.which("g++") or shutil.which("clang++") or shutil.which("cl")
+            if not compiler:
+                return {
+                    "ok": False,
+                    "output": "No C++ compiler found. Install g++, clang++, or MSVC cl and try again.",
+                }
+
+            build_dir = workspace / ".code_agent_build"
+            build_dir.mkdir(parents=True, exist_ok=True)
+            exe_name = path.stem + (".exe" if os.name == "nt" else "")
+            exe_path = build_dir / exe_name
+            if Path(compiler).name.lower() == "cl.exe":
+                compile_cmd = [compiler, "/nologo", "/EHsc", str(rel_path), f"/Fe:{exe_path}"]
+            else:
+                compile_cmd = [
+                    compiler,
+                    "-std=c++17",
+                    "-O2",
+                    "-Wall",
+                    "-Wextra",
+                    str(rel_path),
+                    "-o",
+                    str(exe_path),
+                ]
+
+            compile_result = self._run_process(compile_cmd, workspace, "compile")
+            if not compile_result["ok"]:
+                return compile_result
+            run_result = self._run_process([str(exe_path)], workspace, "run")
+            run_result["output"] = compile_result["output"] + "\n\n" + run_result["output"]
+            return run_result
+        return {"ok": False, "output": f"Run File supports Python and C++ only, not {suffix or 'extensionless'} files."}
+
+    def _run_process(self, command: list[str], cwd: Path, label: str) -> dict[str, Any]:
+        completed = subprocess.run(
+            command,
+            cwd=cwd,
+            text=True,
+            capture_output=True,
+            timeout=20,
+        )
+        command_text = " ".join(command)
+        output = "\n".join(
+            part
+            for part in [
+                f"$ {command_text}",
+                f"exit_code={completed.returncode}",
+                completed.stdout.strip(),
+                completed.stderr.strip(),
+            ]
+            if part
+        )
+        if completed.returncode == 0 and output == f"$ {command_text}\nexit_code=0":
+            output += f"\n{label} succeeded and produced no output."
+        return {"ok": completed.returncode == 0, "output": output}
+
     def _resolve_workspace_path(self, workspace: Path, raw_path: str) -> Path:
         root = workspace.resolve()
         path = (root / raw_path).resolve()
@@ -169,6 +246,13 @@ class DemoHandler(SimpleHTTPRequestHandler):
             raise ValueError(f"Not a file: {raw_path}")
         return path
 
+    def _resolve_workspace(self, raw_path: str) -> Path:
+        root = ROOT.resolve()
+        workspace = (root / raw_path).resolve()
+        if workspace != root and root not in workspace.parents:
+            raise ValueError(f"Workspace escapes project root: {raw_path}")
+        return workspace
+
     def _list_workspace_files(self, workspace: Path) -> list[dict[str, Any]]:
         root = workspace.resolve()
         if not root.exists():
@@ -177,7 +261,7 @@ class DemoHandler(SimpleHTTPRequestHandler):
         files: list[dict[str, Any]] = []
         for path in sorted(root.rglob("*")):
             rel = path.relative_to(root)
-            if any(part in {".git", "__pycache__", ".venv"} for part in rel.parts):
+            if any(part in {".git", "__pycache__", ".venv", ".code_agent_build"} for part in rel.parts):
                 continue
             if path.is_file():
                 files.append(
@@ -195,6 +279,9 @@ class DemoHandler(SimpleHTTPRequestHandler):
     def _language_for(self, path: Path) -> str:
         return {
             ".py": "Python",
+            ".cpp": "C++",
+            ".cc": "C++",
+            ".cxx": "C++",
             ".js": "JavaScript",
             ".html": "HTML",
             ".css": "CSS",

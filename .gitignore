@@ -9,3 +9,8 @@ web_demo_workspace/
 codex_like_workspace/
 llm_only_workspace/
 live_workspace/
+eval_runs/
+tool_smoke_workspace/
+.code_agent_build/
+workspace/.code_agent_build/
+tests/_work/
