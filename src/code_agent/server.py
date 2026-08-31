@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from .agent import CodingAgent
+from .config import PROVIDER_DEFAULTS, load_llm_config
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -70,6 +71,7 @@ class DemoHandler(SimpleHTTPRequestHandler):
 
         task = str(payload.get("task") or "Create a hello world Python script and run it.")
         mode = str(payload.get("mode") or "code")
+        provider = str(payload.get("provider") or "").strip() or None
         history = payload.get("history") if isinstance(payload.get("history"), list) else []
         try:
             workspace = self._resolve_workspace(str(payload.get("workspace") or "workspace"))
@@ -86,7 +88,7 @@ class DemoHandler(SimpleHTTPRequestHandler):
             self._write_ndjson(event)
 
         try:
-            agent = CodingAgent(workspace, sink=emit, mode=mode)
+            agent = CodingAgent(workspace, sink=emit, mode=mode, provider=provider)
             final = agent.run(task, history=history)
             self._write_ndjson(
                 {
@@ -129,6 +131,29 @@ class DemoHandler(SimpleHTTPRequestHandler):
 
     def do_GET(self) -> None:
         parsed = urllib.parse.urlparse(self.path)
+        if parsed.path == "/api/providers":
+            labels = {
+                "deepseek": "DeepSeek",
+                "openai": "ChatGPT (CloseAI)",
+                "claude": "Claude (CloseAI)",
+                "qwen": "Qwen",
+            }
+            self._json(
+                {
+                    "ok": True,
+                    "providers": [
+                        {
+                            "id": provider,
+                            "label": labels[provider],
+                            "protocol": load_llm_config(provider=provider).protocol,
+                            "default_model": load_llm_config(provider=provider).model,
+                        }
+                        for provider in labels
+                    ],
+                }
+            )
+            return
+
         if parsed.path == "/api/files":
             params = urllib.parse.parse_qs(parsed.query)
             try:

@@ -8,41 +8,132 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_ENV_FILE = ROOT / "config" / "llm.env"
 
+PROVIDER_ALIASES = {
+    "deepseek": "deepseek",
+    "openai": "openai",
+    "chatgpt": "openai",
+    "claude": "claude",
+    "anthropic": "claude",
+    "qwen": "qwen",
+    "dashscope": "qwen",
+}
+
+PROVIDER_DEFAULTS = {
+    "deepseek": {
+        "base_url": "https://api.deepseek.com/v1",
+        "model": "deepseek-chat",
+        "api_key_names": ("DEEPSEEK_API_KEY",),
+        "base_url_names": ("DEEPSEEK_BASE_URL",),
+        "model_names": ("DEEPSEEK_MODEL",),
+        "protocol_names": ("DEEPSEEK_PROTOCOL",),
+        "protocol": "openai",
+    },
+    "openai": {
+        "base_url": "https://api.openai-proxy.org/v1",
+        "model": "gpt-4o",
+        "api_key_names": ("CLOSEAI_API_KEY",),
+        "base_url_names": ("CLOSEAI_BASE_URL",),
+        "model_names": ("CLOSEAI_OPENAI_MODEL", "CLOSEAI_MODEL"),
+        "protocol_names": ("CLOSEAI_OPENAI_PROTOCOL", "CLOSEAI_PROTOCOL"),
+        "protocol": "openai",
+    },
+    "claude": {
+        "base_url": "https://api.openai-proxy.org/v1",
+        "model": "claude-haiku-4-5",
+        "api_key_names": ("CLOSEAI_API_KEY",),
+        "base_url_names": ("CLOSEAI_BASE_URL",),
+        "model_names": ("CLOSEAI_CLAUDE_MODEL", "CLOSEAI_MODEL"),
+        "protocol_names": ("CLOSEAI_CLAUDE_PROTOCOL", "CLOSEAI_PROTOCOL"),
+        "protocol": "openai",
+    },
+    "qwen": {
+        "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        "model": "qwen-plus",
+        "api_key_names": ("QWEN_API_KEY", "DASHSCOPE_API_KEY"),
+        "base_url_names": ("QWEN_BASE_URL", "DASHSCOPE_BASE_URL"),
+        "model_names": ("QWEN_MODEL", "DASHSCOPE_MODEL"),
+        "protocol_names": ("QWEN_PROTOCOL", "DASHSCOPE_PROTOCOL"),
+        "protocol": "openai",
+    },
+}
+
 
 @dataclass(frozen=True)
 class LLMConfig:
+    provider: str
     base_url: str
     model: str
     api_key: str
+    api_key_env_names: tuple[str, ...]
+    protocol: str
     env_file: Path
     context_tokens: int
     repo_map_chars: int
 
 
-def load_llm_config(env_file: str | os.PathLike[str] | None = None) -> LLMConfig:
+def load_llm_config(
+    env_file: str | os.PathLike[str] | None = None,
+    provider: str | None = None,
+) -> LLMConfig:
     path = Path(env_file or os.getenv("CODE_AGENT_ENV_FILE") or DEFAULT_ENV_FILE).resolve()
     values = _read_env_file(path)
 
     # Real environment variables override the file, which is useful for CI or one-off runs.
-    base_url = os.getenv("CODE_AGENT_BASE_URL") or values.get("CODE_AGENT_BASE_URL") or "https://api.openai.com/v1"
-    model = os.getenv("CODE_AGENT_MODEL") or values.get("CODE_AGENT_MODEL") or "gpt-4o-mini"
-    api_key = (
-        os.getenv("CODE_AGENT_API_KEY")
-        or os.getenv("OPENAI_API_KEY")
-        or os.getenv("DEEPSEEK_API_KEY")
-        or values.get("CODE_AGENT_API_KEY")
-        or values.get("OPENAI_API_KEY")
-        or values.get("DEEPSEEK_API_KEY")
-        or ""
+    configured_raw_provider = _first_nonempty("CODE_AGENT_PROVIDER", values) or "deepseek"
+    configured_provider = PROVIDER_ALIASES.get(configured_raw_provider.strip().lower())
+    if configured_provider is None:
+        supported = ", ".join(sorted(PROVIDER_DEFAULTS))
+        raise ValueError(
+            f"Unknown CODE_AGENT_PROVIDER={configured_raw_provider!r}. Choose one of: {supported}."
+        )
+
+    raw_provider = provider or configured_raw_provider
+    provider = PROVIDER_ALIASES.get(raw_provider.strip().lower())
+    if provider is None:
+        supported = ", ".join(sorted(PROVIDER_DEFAULTS))
+        raise ValueError(f"Unknown provider={raw_provider!r}. Choose one of: {supported}.")
+
+    # The web dropdown can override the env-selected provider for one request. In that
+    # case, do not accidentally reuse a generic DeepSeek value from the local env file.
+    use_common_values = provider == configured_provider or raw_provider == configured_raw_provider
+
+    defaults = PROVIDER_DEFAULTS[provider]
+    # Provider-specific overrides take precedence over the common values. This prevents
+    # an old DeepSeek URL in a local env file from breaking a newly selected relay.
+    base_url = (
+        _first_nonempty_from_names(tuple(defaults["base_url_names"]), values)
+        or (_first_nonempty("CODE_AGENT_BASE_URL", values) if use_common_values else "")
+        or defaults["base_url"]
     )
+    model = (
+        _first_nonempty_from_names(tuple(defaults["model_names"]), values)
+        or (_first_nonempty("CODE_AGENT_MODEL", values) if use_common_values else "")
+        or defaults["model"]
+    )
+    api_key_names = tuple(defaults["api_key_names"])
+    api_key = _first_nonempty_from_names(api_key_names, values)
+    if not api_key and use_common_values:
+        api_key = _first_nonempty("CODE_AGENT_API_KEY", values)
+
+    raw_protocol = (
+        _first_nonempty_from_names(tuple(defaults["protocol_names"]), values)
+        or (_first_nonempty("CODE_AGENT_PROTOCOL", values) if use_common_values else "")
+        or str(defaults["protocol"])
+    )
+    protocol = raw_protocol.strip().lower()
+    if protocol not in {"openai", "anthropic"}:
+        raise ValueError("CODE_AGENT_PROTOCOL must be 'openai' or 'anthropic'.")
 
     context_tokens = _read_int("CODE_AGENT_CONTEXT_TOKENS", values, 16000, minimum=4000)
     repo_map_chars = _read_int("CODE_AGENT_REPO_MAP_CHARS", values, 6000, minimum=800)
 
     return LLMConfig(
+        provider=provider,
         base_url=base_url.rstrip("/"),
         model=model,
         api_key=api_key,
+        api_key_env_names=api_key_names,
+        protocol=protocol,
         env_file=path,
         context_tokens=context_tokens,
         repo_map_chars=repo_map_chars,
@@ -57,6 +148,18 @@ def _read_int(key: str, values: dict[str, str], default: int, minimum: int) -> i
         return max(minimum, int(raw))
     except ValueError:
         return default
+
+
+def _first_nonempty(key: str, values: dict[str, str]) -> str:
+    return os.getenv(key) or values.get(key) or ""
+
+
+def _first_nonempty_from_names(names: tuple[str, ...], values: dict[str, str]) -> str:
+    for name in names:
+        value = os.getenv(name) or values.get(name)
+        if value:
+            return value
+    return ""
 
 
 def _read_env_file(path: Path) -> dict[str, str]:

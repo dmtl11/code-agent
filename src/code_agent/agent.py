@@ -30,6 +30,13 @@ edit files or execute commands. Cite file paths and line numbers from read_file 
 files, interfaces, risks, and verification steps. Do not edit files or execute commands. Call finish with the plan.""",
 }
 
+PROVIDER_IDENTITIES = {
+    "deepseek": "DeepSeek",
+    "openai": "ChatGPT (through CloseAI)",
+    "claude": "Claude (through CloseAI)",
+    "qwen": "Qwen",
+}
+
 VALID_MODES = {"code", "ask", "architect", "context"}
 EventSink = Callable[[dict[str, Any]], None]
 
@@ -43,15 +50,18 @@ class CodingAgent:
         mode: str = "code",
         context_tokens: int | None = None,
         model: Any | None = None,
+        provider: str | None = None,
     ) -> None:
         if mode not in VALID_MODES:
             raise ValueError(f"Unknown mode: {mode}")
-        config = load_llm_config()
+        config = load_llm_config(provider=provider)
         self.workspace = Path(workspace).resolve()
         self.max_turns = max_turns
         self.mode = mode
+        self.provider = config.provider
+        self.model_name = config.model
         self.tools = LocalTools(self.workspace, mode=mode, repo_map_chars=config.repo_map_chars)
-        self.model = model or ChatModel()
+        self.model = model or ChatModel(config=config)
         self.context = ContextManager(max_tokens=context_tokens or config.context_tokens)
         self.repo_map_chars = config.repo_map_chars
         self.sink = sink or (lambda event: None)
@@ -75,8 +85,17 @@ class CodingAgent:
             return self._finish(task, f"{repo_map}\n\nEstimated retained context: {estimated} tokens.")
 
         context_note = history_note or "No earlier chat messages were omitted or compacted."
+        identity = PROVIDER_IDENTITIES.get(self.provider, self.provider)
         messages: list[dict[str, Any]] = [
-            {"role": "system", "content": f"{BASE_PROMPT}\n\n{MODE_PROMPTS[self.mode]}"},
+            {
+                "role": "system",
+                "content": (
+                    f"{BASE_PROMPT}\n\n{MODE_PROMPTS[self.mode]}\n\n"
+                    f"Current model identity: {identity}. Configured model name: {self.model_name}. "
+                    f"If the user asks which model is active, answer with {identity} and the configured model name. "
+                    "Do not claim to be Claude, ChatGPT, DeepSeek, or Qwen unless it matches the current model identity."
+                ),
+            },
             {"role": "system", "content": repo_map},
             {"role": "system", "content": context_note},
             *clean_history,

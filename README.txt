@@ -1,10 +1,10 @@
 Git 仓库地址：待创建公开仓库后填写。
 
 项目简介：
-这是一个从零实现的轻量 Coding Agent Harness。项目不依赖 LangChain、LlamaIndex、OpenAI Agents SDK、AutoGen、CrewAI 等 Agent 框架，自行完成消息管理、工具定义、模型输出解析、循环终止、错误处理和本地执行。模型通过 config/llm.env 接入 DeepSeek 或其他 OpenAI 兼容服务。
+这是一个从零实现的轻量 Coding Agent Harness。项目不依赖 LangChain、LlamaIndex、OpenAI Agents SDK、AutoGen、CrewAI 等 Agent 框架，自行完成消息管理、工具定义、模型输出解析、循环终止、错误处理和本地执行。模型通过 config/llm.env 接入 DeepSeek、Qwen，以及通过 CloseAI 中转的 ChatGPT 和 Claude。
 
 运行方法：
-1. 将 config/llm.env.example 复制为 config/llm.env，填写 API 地址、模型和 Key。
+1. 将 config/llm.env.example 复制为 config/llm.env，填写 CLOSEAI_API_KEY 和 CLOSEAI_BASE_URL。ChatGPT/Claude 通过下拉框选择，Claude 还要根据中转协议设置 CLOSEAI_CLAUDE_PROTOCOL=openai 或 anthropic。
 2. CLI：python run.py "Create a Python script and test it."
 3. Web：python run.py --web --port 8767，然后打开 http://127.0.0.1:8767
 4. 评测：python run.py --eval

@@ -14,14 +14,20 @@ const runFileButton = document.querySelector("#run-file");
 const terminalEl = document.querySelector("#terminal");
 const modeButtons = document.querySelectorAll("#mode-switch [data-mode]");
 const contextStatusEl = document.querySelector("#context-status");
+const providerEl = document.querySelector("#provider");
+const providerHintEl = document.querySelector("#provider-hint");
 let activeFile = "";
 let openFileRequestId = 0;
 let activeMode = "code";
 let conversationHistory = [];
+let providerCatalog = new Map();
+let conversationHistoryByProvider = new Map();
+let previousProvider = providerEl.value;
 
 clearButton.addEventListener("click", () => {
   eventsEl.innerHTML = '<li class="empty">Ask the agent to change code in this workspace.</li>';
   conversationHistory = [];
+  conversationHistoryByProvider.set(providerEl.value, []);
   contextStatusEl.textContent = "Context ready";
 });
 
@@ -32,6 +38,13 @@ modeButtons.forEach((button) => {
     taskEl.placeholder = modePlaceholder(activeMode);
     runButton.textContent = activeMode === "context" ? "Inspect" : "Run";
   });
+});
+
+providerEl.addEventListener("change", () => {
+  conversationHistoryByProvider.set(previousProvider, conversationHistory);
+  previousProvider = providerEl.value;
+  conversationHistory = conversationHistoryByProvider.get(providerEl.value) || [];
+  updateProviderHint();
 });
 
 refreshButton.addEventListener("click", refreshFiles);
@@ -59,6 +72,7 @@ runButton.addEventListener("click", async () => {
         task,
         workspace: workspaceEl.value,
         mode: activeMode,
+        provider: providerEl.value,
         history: conversationHistory,
       }),
     });
@@ -69,6 +83,7 @@ runButton.addEventListener("click", async () => {
     if (finalEvent?.ok && Array.isArray(finalEvent.exchange)) {
       conversationHistory.push(...finalEvent.exchange);
       conversationHistory = conversationHistory.slice(-20);
+      conversationHistoryByProvider.set(providerEl.value, conversationHistory);
     }
     statusEl.textContent = "done";
     await refreshFiles();
@@ -81,6 +96,35 @@ runButton.addEventListener("click", async () => {
 });
 
 refreshFiles();
+loadProviders();
+
+async function loadProviders() {
+  try {
+    const response = await fetch("/api/providers");
+    const payload = await response.json();
+    if (!payload.ok || !Array.isArray(payload.providers)) return;
+    providerCatalog = new Map(payload.providers.map((provider) => [provider.id, provider]));
+    const selected = providerEl.value;
+    providerEl.innerHTML = "";
+    for (const provider of payload.providers) {
+      const option = document.createElement("option");
+      option.value = provider.id;
+      option.textContent = provider.label;
+      providerEl.append(option);
+    }
+    providerEl.value = providerCatalog.has(selected) ? selected : payload.providers[0]?.id;
+    updateProviderHint();
+  } catch (error) {
+    providerHintEl.textContent = "Provider list unavailable; using local selection";
+  }
+}
+
+function updateProviderHint() {
+  const provider = providerCatalog.get(providerEl.value);
+  if (!provider) return;
+  const protocol = provider.protocol === "anthropic" ? "Anthropic" : "OpenAI-compatible";
+  providerHintEl.textContent = `${protocol} · ${provider.default_model}`;
+}
 
 async function readEventStream(body) {
   const reader = body.getReader();

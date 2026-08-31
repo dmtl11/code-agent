@@ -61,7 +61,19 @@
           <li class="empty">Ask the agent to change code in this workspace.</li>
         </ol>
         <section class="composer">
-          <textarea id="task">Create a hello world Python script and run it.</textarea>
+          <div class="composer-main">
+            <div class="composer-toolbar">
+              <label for="provider">Model</label>
+              <select id="provider" title="选择本次请求使用的大模型">
+                <option value="deepseek">DeepSeek</option>
+                <option value="openai">ChatGPT (CloseAI)</option>
+                <option value="claude">Claude (CloseAI)</option>
+                <option value="qwen">Qwen</option>
+              </select>
+              <span id="provider-hint">OpenAI-compatible · deepseek-chat</span>
+            </div>
+            <textarea id="task">Create a hello world Python script and run it.</textarea>
+          </div>
           <button id="run" class="run" type="button">Run</button>
         </section>
       </aside>
