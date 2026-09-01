@@ -27,6 +27,13 @@ def print_event(event: dict[str, Any]) -> None:
             f"\ncontext: {event.get('estimated_tokens', 0)}/{event.get('max_tokens', 0)} tokens, "
             f"compacted={compacted}, truncated={truncated}"
         )
+    elif kind == "route":
+        fallback = int(event.get("fallback_count", 0))
+        print(
+            f"\nauto route: {event.get('stage')} score={event.get('score')} -> "
+            f"{event.get('selected_provider')}/{event.get('selected_model')} "
+            f"(fallbacks={fallback})"
+        )
 
 
 def main() -> None:
@@ -36,8 +43,14 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Run the coding-agent harness.")
     parser.add_argument("task", nargs="?", default="Create a hello world Python script and run it.")
     parser.add_argument("--workspace", default="workspace", help="Directory the agent may read and write.")
-    parser.add_argument("--max-turns", type=int, default=12)
+    parser.add_argument("--max-turns", type=int, default=24)
     parser.add_argument("--mode", choices=["code", "ask", "architect", "context"], default="code")
+    parser.add_argument(
+        "--provider",
+        choices=["auto", "qwen", "deepseek", "openai", "claude"],
+        default=None,
+        help="Model provider. Auto uses task-aware routing and cascade fallback.",
+    )
     parser.add_argument(
         "--context-tokens",
         type=int,
@@ -53,6 +66,7 @@ def main() -> None:
         print_event,
         mode=args.mode,
         context_tokens=args.context_tokens,
+        provider=args.provider,
     ).run(args.task)
     print(f"\nfinal: {final}")
 

@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Code Agent Harness</title>
-    <link rel="stylesheet" href="./styles.css?v=20260830-1700" />
+    <link rel="stylesheet" href="./styles.css?v=20260901-1220" />
   </head>
   <body>
     <main class="app">
@@ -76,6 +76,7 @@
               <div>
                 <button id="review-refresh" type="button" title="刷新审查变更">Refresh</button>
                 <button id="review-merge" type="button" disabled title="合并选中的两次或多次修改">Merge selected</button>
+                <button id="review-rollback" type="button" disabled title="回滚选中的修改">Rollback selected</button>
               </div>
             </div>
             <ol id="reviews" class="reviews">
@@ -93,6 +94,10 @@
               <div id="monitor-providers" class="monitor-list"></div>
             </section>
             <section class="monitor-section">
+              <h3>Auto routes</h3>
+              <div id="monitor-routes" class="monitor-list"></div>
+            </section>
+            <section class="monitor-section">
               <h3>By tool</h3>
               <div id="monitor-tools" class="monitor-list"></div>
             </section>
@@ -106,12 +111,13 @@
               <div class="composer-toolbar">
                 <label for="provider">Model</label>
                 <select id="provider" title="选择本次请求使用的大模型">
+                  <option value="auto">Auto (Qwen-first)</option>
                   <option value="deepseek">DeepSeek</option>
                   <option value="openai">ChatGPT (CloseAI)</option>
                   <option value="claude">Claude (CloseAI)</option>
                   <option value="qwen">Qwen</option>
                 </select>
-                <span id="provider-hint">OpenAI-compatible · deepseek-chat</span>
+                <span id="provider-hint">Smart cascade · auto-cascade</span>
               </div>
               <textarea id="task">Create a hello world Python script and run it.</textarea>
             </div>
@@ -120,6 +126,6 @@
         </div>
       </aside>
     </main>
-    <script src="./app.js?v=20260830-1700"></script>
+    <script src="./app.js?v=20260901-2330"></script>
   </body>
 </html>

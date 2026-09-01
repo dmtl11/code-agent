@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import difflib
 import json
 import sqlite3
 import threading
@@ -116,6 +117,9 @@ class SessionStore:
                     path TEXT NOT NULL,
                     before_content TEXT NOT NULL,
                     after_content TEXT NOT NULL,
+                    diff_text TEXT NOT NULL DEFAULT '',
+                    before_exists INTEGER NOT NULL DEFAULT 1,
+                    after_exists INTEGER NOT NULL DEFAULT 1,
                     status TEXT NOT NULL DEFAULT 'pending',
                     created_at TEXT NOT NULL,
                     UNIQUE(session_id, run_id, path),
@@ -147,6 +151,18 @@ class SessionStore:
                 CREATE INDEX IF NOT EXISTS metric_records_session_idx ON metric_records(session_id, id);
                 """
             )
+            review_columns = {
+                str(row["name"])
+                for row in db.execute("PRAGMA table_info(review_changes)").fetchall()
+            }
+            migrations = {
+                "diff_text": "ALTER TABLE review_changes ADD COLUMN diff_text TEXT NOT NULL DEFAULT ''",
+                "before_exists": "ALTER TABLE review_changes ADD COLUMN before_exists INTEGER NOT NULL DEFAULT 1",
+                "after_exists": "ALTER TABLE review_changes ADD COLUMN after_exists INTEGER NOT NULL DEFAULT 1",
+            }
+            for column, statement in migrations.items():
+                if column not in review_columns:
+                    db.execute(statement)
 
     @staticmethod
     def _now() -> str:
@@ -318,29 +334,75 @@ class SessionStore:
         path: str,
         before_content: str,
         after_content: str,
+        before_exists: bool = True,
+        after_exists: bool = True,
+        diff_text: str | None = None,
     ) -> int:
+        if diff_text is None:
+            diff_text = self._review_diff(path, before_content, after_content, before_exists, after_exists)
         with self._lock, self._connect() as db:
             cursor = db.execute(
-                "INSERT INTO review_changes(session_id, run_id, path, before_content, after_content, status, created_at) "
-                "VALUES (?, ?, ?, ?, ?, 'pending', ?)",
-                (session_id, run_id, path, before_content, after_content, self._now()),
+                "INSERT INTO review_changes(session_id, run_id, path, before_content, after_content, diff_text, "
+                "before_exists, after_exists, status, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)",
+                (
+                    session_id,
+                    run_id,
+                    path,
+                    before_content,
+                    after_content,
+                    diff_text,
+                    1 if before_exists else 0,
+                    1 if after_exists else 0,
+                    self._now(),
+                ),
             )
             return int(cursor.lastrowid)
 
     def list_review_changes(self, session_id: str, limit: int = 100) -> list[dict[str, Any]]:
         with self._connect() as db:
             rows = db.execute(
-                "SELECT id, run_id, path, before_content, after_content, status, created_at "
+                "SELECT id, run_id, path, before_content, after_content, diff_text, before_exists, "
+                "after_exists, status, created_at "
                 "FROM review_changes WHERE session_id = ? ORDER BY id DESC LIMIT ?",
                 (session_id, max(1, min(limit, 200))),
             ).fetchall()
         changes: list[dict[str, Any]] = []
         for row in rows:
             item = dict(row)
+            item["before_exists"] = bool(item["before_exists"])
+            item["after_exists"] = bool(item["after_exists"])
+            item["diff"] = item.pop("diff_text") or self._review_diff(
+                item["path"],
+                item["before_content"],
+                item["after_content"],
+                item["before_exists"],
+                item["after_exists"],
+            )
             item["before_preview"] = item.pop("before_content")[:12000]
             item["after_preview"] = item.pop("after_content")[:12000]
             changes.append(item)
         return changes
+
+    @staticmethod
+    def _review_diff(
+        path: str,
+        before_content: str,
+        after_content: str,
+        before_exists: bool,
+        after_exists: bool,
+    ) -> str:
+        from_file = f"a/{path}" if before_exists else "/dev/null"
+        to_file = f"b/{path}" if after_exists else "/dev/null"
+        return "\n".join(
+            difflib.unified_diff(
+                before_content.splitlines(),
+                after_content.splitlines(),
+                fromfile=from_file,
+                tofile=to_file,
+                lineterm="",
+            )
+        )
 
     def get_review_changes(self, session_id: str, change_ids: list[int]) -> list[dict[str, Any]]:
         if not change_ids:
@@ -348,20 +410,33 @@ class SessionStore:
         placeholders = ",".join("?" for _ in change_ids)
         with self._connect() as db:
             rows = db.execute(
-                f"SELECT id, run_id, path, before_content, after_content, status, created_at "
+                f"SELECT id, run_id, path, before_content, after_content, diff_text, before_exists, "
+                f"after_exists, status, created_at "
                 f"FROM review_changes WHERE session_id = ? AND id IN ({placeholders}) ORDER BY id",
                 [session_id, *change_ids],
             ).fetchall()
-        return [dict(row) for row in rows]
+        changes = [dict(row) for row in rows]
+        for change in changes:
+            change["before_exists"] = bool(change["before_exists"])
+            change["after_exists"] = bool(change["after_exists"])
+        return changes
 
     def mark_review_changes_merged(self, session_id: str, change_ids: list[int]) -> None:
+        self._mark_review_changes(session_id, change_ids, "merged")
+
+    def mark_review_changes_rolled_back(self, session_id: str, change_ids: list[int]) -> None:
+        self._mark_review_changes(session_id, change_ids, "rolled_back")
+
+    def _mark_review_changes(self, session_id: str, change_ids: list[int], status: str) -> None:
+        if status not in {"merged", "rolled_back"}:
+            raise ValueError(f"Unknown review status: {status}")
         if not change_ids:
             return
         placeholders = ",".join("?" for _ in change_ids)
         with self._lock, self._connect() as db:
             db.execute(
-                f"UPDATE review_changes SET status = 'merged' WHERE session_id = ? AND id IN ({placeholders})",
-                [session_id, *change_ids],
+                f"UPDATE review_changes SET status = ? WHERE session_id = ? AND id IN ({placeholders})",
+                [status, session_id, *change_ids],
             )
 
     def record_metric(self, session_id: str, metric: dict[str, Any]) -> None:
@@ -423,6 +498,7 @@ class SessionStore:
         tools = [row for row in records if row["kind"] == "tool_result"]
         runs = [row for row in records if row["kind"] == "run"]
         contexts = [row for row in records if row["kind"] == "context"]
+        routes = [row for row in records if row["kind"] == "route"]
         llm_success = sum(row["ok"] for row in llm)
         llm_errors = len(llm) - llm_success
         tool_success = sum(row["ok"] for row in tools)
@@ -443,6 +519,7 @@ class SessionStore:
 
         providers = self._aggregate_monitoring(llm, "model")
         tool_breakdown = self._aggregate_monitoring(tools, "tool_name")
+        route_breakdown = self._aggregate_routes(routes)
         error_records = [
             {
                 "kind": row["kind"],
@@ -485,8 +562,11 @@ class SessionStore:
                 "truncated_tool_results": sum(row["truncated_tool_results"] for row in contexts),
                 "sessions": len({row["session_id"] for row in records}),
                 "active_sessions": self._active_session_count(workspace, session_id),
+                "route_decisions": len(routes),
+                "route_fallbacks": sum(bool(row["error"]) for row in routes),
             },
             "providers": providers,
+            "routes": route_breakdown,
             "tools": tool_breakdown,
             "recent_errors": error_records,
             "last_updated": self._now(),
@@ -536,6 +616,26 @@ class SessionStore:
                         / max(1, sum(item["latency_ms"] > 0 for item in items)),
                         2,
                     ),
+                }
+            )
+        return sorted(result, key=lambda item: (-item["requests"], item["name"]))
+
+    @staticmethod
+    def _aggregate_routes(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        grouped: dict[str, list[dict[str, Any]]] = {}
+        for row in records:
+            grouped.setdefault(str(row.get("model") or "unavailable"), []).append(row)
+        result: list[dict[str, Any]] = []
+        for name, items in grouped.items():
+            fallbacks = sum(bool(item.get("error")) for item in items)
+            result.append(
+                {
+                    "name": name,
+                    "requests": len(items),
+                    "errors": fallbacks,
+                    "error_rate": round(fallbacks / len(items) * 100, 2),
+                    "total_tokens": 0,
+                    "avg_latency_ms": 0,
                 }
             )
         return sorted(result, key=lambda item: (-item["requests"], item["name"]))

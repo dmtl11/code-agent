@@ -25,17 +25,21 @@ class ContextStats:
 class ContextManager:
     """Keep model requests inside a predictable local context budget."""
 
-    def __init__(self, max_tokens: int = 16000, reserve_tokens: int = 2500) -> None:
+    def __init__(self, max_tokens: int = 32000, reserve_tokens: int | None = None) -> None:
         self.max_tokens = max(4000, max_tokens)
+        if reserve_tokens is None:
+            reserve_tokens = max(2500, min(8192, self.max_tokens // 4))
         self.reserve_tokens = min(max(1000, reserve_tokens), self.max_tokens // 2)
         self.target_tokens = self.max_tokens - self.reserve_tokens
 
     def prepare_history(
         self,
         history: list[dict[str, Any]] | None,
-        max_tokens: int = 2500,
+        max_tokens: int | None = None,
     ) -> tuple[list[dict[str, Any]], str]:
+        history_budget = max_tokens if max_tokens is not None else min(8000, max(2500, self.max_tokens // 4))
         clean: list[dict[str, Any]] = []
+        rejected = 0
         for message in history or []:
             role = message.get("role")
             content = message.get("content")
@@ -57,18 +61,80 @@ class ContextManager:
                     }
                 )
 
-        kept: list[dict[str, Any]] = []
+        blocks, invalid = self._history_blocks(clean)
+        rejected += invalid
+        kept_blocks: list[list[dict[str, Any]]] = []
         used = 0
-        for message in reversed(clean):
-            cost = self.estimate_tokens(message)
-            if kept and used + cost > max_tokens:
+        for block in reversed(blocks):
+            cost = self.estimate_tokens(block)
+            if kept_blocks and used + cost > history_budget:
                 break
-            kept.append(message)
+            kept_blocks.append(block)
             used += cost
-        kept.reverse()
-        omitted = len(clean) - len(kept)
-        summary = f"{omitted} older chat messages were omitted by the history budget." if omitted else ""
+        kept_blocks.reverse()
+        kept = [message for block in kept_blocks for message in block]
+        valid_count = sum(len(block) for block in blocks)
+        omitted = rejected + valid_count - len(kept)
+        summary = (
+            f"{omitted} older or incomplete chat messages were omitted by the history budget."
+            if omitted
+            else ""
+        )
         return kept, summary
+
+    @staticmethod
+    def _history_blocks(
+        messages: list[dict[str, Any]],
+    ) -> tuple[list[list[dict[str, Any]]], int]:
+        """Return protocol-safe history blocks without orphaned tool messages."""
+        blocks: list[list[dict[str, Any]]] = []
+        rejected = 0
+        index = 0
+        while index < len(messages):
+            message = messages[index]
+            role = message.get("role")
+            if role == "tool":
+                rejected += 1
+                index += 1
+                continue
+
+            tool_calls = message.get("tool_calls") if role == "assistant" else None
+            if not tool_calls:
+                blocks.append([message])
+                index += 1
+                continue
+
+            call_ids = [
+                str(call.get("id") or "")
+                for call in tool_calls
+                if isinstance(call, dict) and call.get("id")
+            ]
+            next_index = index + 1
+            results: dict[str, dict[str, Any]] = {}
+            while next_index < len(messages) and messages[next_index].get("role") == "tool":
+                tool_message = messages[next_index]
+                call_id = str(tool_message.get("tool_call_id") or "")
+                if call_id in call_ids and call_id not in results:
+                    results[call_id] = tool_message
+                else:
+                    rejected += 1
+                next_index += 1
+
+            valid_call_ids = (
+                bool(call_ids)
+                and len(call_ids) == len(tool_calls)
+                and len(set(call_ids)) == len(call_ids)
+            )
+            if valid_call_ids and all(call_id in results for call_id in call_ids):
+                blocks.append([message, *(results[call_id] for call_id in call_ids)])
+            else:
+                content = message.get("content")
+                if isinstance(content, str) and content.strip():
+                    blocks.append([{"role": "assistant", "content": content}])
+                rejected += 1 + len(results)
+            index = next_index
+
+        return blocks, rejected
 
     def compact_working_set(
         self,

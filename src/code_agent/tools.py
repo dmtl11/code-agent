@@ -6,10 +6,16 @@ import shutil
 import shlex
 import subprocess
 import ast
+import re
+import locale
+import signal
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .code_registry import CodeRegistry, IGNORED_PARTS
+from .patching import PatchEngine
 from .repo_map import RepoMap
 
 
@@ -37,13 +43,22 @@ class LocalTools:
         self.workspace.mkdir(parents=True, exist_ok=True)
         self.mode = mode
         self.repo_map_chars = repo_map_chars
+        self.registry = CodeRegistry(self.workspace)
+        self.patch_engine = PatchEngine(self.workspace, self._validate_candidate)
 
     @property
     def allowed_tools(self) -> set[str]:
         read_only = {"repo_map", "list_files", "read_file", "search_files", "finish"}
         if self.mode in {"ask", "architect"}:
             return read_only
-        return read_only | {"lint_file", "replace_in_file", "write_file", "run_command"}
+        return read_only | {
+            "lint_file",
+            "replace_in_file",
+            "write_file",
+            "apply_patch",
+            "rollback_patch",
+            "run_command",
+        }
 
     def schema(self) -> list[dict[str, Any]]:
         tools = [
@@ -151,6 +166,46 @@ class LocalTools:
             {
                 "type": "function",
                 "function": {
+                    "name": "apply_patch",
+                    "description": (
+                        "Apply an exact-context, multi-file patch atomically. Use dry_run first for risky changes; "
+                        "pass base_hashes from read_file to detect stale files."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "required": ["patch"],
+                        "properties": {
+                            "patch": {
+                                "type": "string",
+                                "description": (
+                                    "Patch enclosed by *** Begin Patch / *** End Patch with Add, Update, or Delete File sections."
+                                ),
+                            },
+                            "dry_run": {"type": "boolean"},
+                            "base_hashes": {
+                                "type": "object",
+                                "description": "Optional relative-path to SHA-256 prefix map returned by read_file.",
+                                "additionalProperties": {"type": "string"},
+                            },
+                        },
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "rollback_patch",
+                    "description": "Rollback a previously applied patch if its files have not changed since application.",
+                    "parameters": {
+                        "type": "object",
+                        "required": ["transaction_id"],
+                        "properties": {"transaction_id": {"type": "string"}},
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
                     "name": "run_command",
                     "description": "Run a shell command in the workspace and return stdout/stderr.",
                     "parameters": {
@@ -184,7 +239,7 @@ class LocalTools:
                 raise ToolError(f"Tool {name} is unavailable in {self.mode} mode")
             if name == "repo_map":
                 query = str(arguments.get("query", ""))
-                return ToolResult(True, RepoMap(self.workspace).build(query, self.repo_map_chars))
+                return ToolResult(True, RepoMap(self.workspace, self.registry).build(query, self.repo_map_chars))
             if name == "list_files":
                 return self._list_files(arguments.get("path", "."))
             if name == "read_file":
@@ -209,6 +264,14 @@ class LocalTools:
                 )
             if name == "write_file":
                 return self._write_file(arguments["path"], arguments["content"])
+            if name == "apply_patch":
+                return self._apply_patch(
+                    arguments["patch"],
+                    bool(arguments.get("dry_run", False)),
+                    arguments.get("base_hashes"),
+                )
+            if name == "rollback_patch":
+                return self._rollback_patch(arguments["transaction_id"])
             if name == "run_command":
                 return self._run_command(arguments["command"], int(arguments.get("timeout", 20)))
             if name == "finish":
@@ -233,7 +296,7 @@ class LocalTools:
         rows: list[str] = []
         for path in sorted(root.rglob("*")):
             rel = path.relative_to(self.workspace)
-            if any(part in {".git", "__pycache__", ".venv", ".code_agent_build"} for part in rel.parts):
+            if any(part in IGNORED_PARTS for part in rel.parts):
                 continue
             suffix = "/" if path.is_dir() else ""
             rows.append(f"{rel.as_posix()}{suffix}")
@@ -247,15 +310,17 @@ class LocalTools:
         if not path.is_file():
             raise ToolError(f"Not a file: {raw_path}")
         text = path.read_text(encoding="utf-8")
+        self.registry.update_file(path)
+        content_hash = self.registry.file_hash(raw_path, refresh=False)
         lines = text.splitlines()
         if not lines:
-            return ToolResult(True, f"{raw_path} is empty (0 lines).")
+            return ToolResult(True, f"{raw_path} is empty (0 lines, sha256 {content_hash[:12]}).")
         start = max(1, int(start_line or 1))
         count = max(1, min(int(line_count or 120), 300))
         selected = lines[start - 1 : start - 1 + count]
         numbered = [f"{idx:>4}: {line}" for idx, line in enumerate(selected, start=start)]
         end = start + len(selected) - 1
-        header = f"{raw_path} lines {start}-{end} of {len(lines)}"
+        header = f"{raw_path} lines {start}-{end} of {len(lines)} (sha256 {content_hash[:12]})"
         if end < len(lines):
             header += f" (pass start_line={end + 1} to continue)"
         return ToolResult(True, "\n".join([header, *numbered]))
@@ -271,7 +336,7 @@ class LocalTools:
             if not path.is_file():
                 continue
             rel = path.relative_to(self.workspace)
-            if any(part in {".git", "__pycache__", ".venv", ".code_agent_build"} for part in rel.parts):
+            if any(part in IGNORED_PARTS for part in rel.parts):
                 continue
             if path.suffix.lower() not in {".py", ".cpp", ".cc", ".cxx", ".js", ".html", ".css", ".json", ".md", ".txt"}:
                 continue
@@ -338,6 +403,7 @@ class LocalTools:
         self._validate_candidate(raw_path, content)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
+        self.registry.update_file(path)
         return ToolResult(True, f"Wrote {path.relative_to(self.workspace).as_posix()}")
 
     def _replace_in_file(self, raw_path: str, old_text: str, new_text: str) -> ToolResult:
@@ -357,9 +423,33 @@ class LocalTools:
         candidate = content.replace(old_text, new_text, 1)
         self._validate_candidate(raw_path, candidate)
         path.write_text(candidate, encoding="utf-8")
+        self.registry.update_file(path)
         return ToolResult(
             True,
             f"Replaced one block in {path.relative_to(self.workspace).as_posix()} starting at line {line}.",
+        )
+
+    def _apply_patch(
+        self,
+        patch_text: str,
+        dry_run: bool,
+        base_hashes: Any,
+    ) -> ToolResult:
+        if base_hashes is not None and not isinstance(base_hashes, dict):
+            raise ToolError("base_hashes must be an object mapping relative paths to SHA-256 values")
+        result = self.patch_engine.apply(patch_text, dry_run=dry_run, base_hashes=base_hashes)
+        if not dry_run:
+            for raw_path in result.paths:
+                self.registry.update_file(self._resolve(raw_path))
+        return ToolResult(True, result.message()[:20000])
+
+    def _rollback_patch(self, transaction_id: str) -> ToolResult:
+        result = self.patch_engine.rollback(str(transaction_id))
+        for raw_path in result.paths:
+            self.registry.update_file(self._resolve(raw_path))
+        return ToolResult(
+            True,
+            f"Rolled back patch {result.transaction_id} for: {', '.join(result.paths)}\n\n{result.diff}"[:20000],
         )
 
     def _validate_candidate(self, raw_path: str, content: str) -> None:
@@ -372,15 +462,74 @@ class LocalTools:
 
     def _run_command(self, command: str, timeout: int) -> ToolResult:
         self._guard_command(command)
-        completed = subprocess.run(
-            command,
-            cwd=self.workspace,
-            shell=True,
-            text=True,
-            capture_output=True,
-            timeout=max(1, min(timeout, 60)),
-        )
+        creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) if os.name == "nt" else 0
+        bounded_timeout = max(1, min(timeout, 60))
+        with tempfile.TemporaryFile(mode="w+b") as stdout_file, tempfile.TemporaryFile(mode="w+b") as stderr_file:
+            process = subprocess.Popen(
+                command,
+                cwd=self.workspace,
+                shell=True,
+                stdout=stdout_file,
+                stderr=stderr_file,
+                creationflags=creationflags,
+                start_new_session=os.name != "nt",
+            )
+            try:
+                process.wait(timeout=bounded_timeout)
+            except subprocess.TimeoutExpired:
+                self._terminate_process_tree(process)
+                try:
+                    process.wait(timeout=1)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=1)
+                stdout = self._read_capture(stdout_file)
+                stderr = self._read_capture(stderr_file)
+                output = "\n".join(
+                    part
+                    for part in [
+                        f"Command timed out after {bounded_timeout}s; its process tree was terminated.",
+                        stdout.strip(),
+                        stderr.strip(),
+                    ]
+                    if part
+                )
+                return ToolResult(False, output[:12000])
+            stdout = self._read_capture(stdout_file)
+            stderr = self._read_capture(stderr_file)
+        completed = subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
         return self._process_result(completed, "Command")
+
+    @staticmethod
+    def _read_capture(stream: Any) -> str:
+        stream.flush()
+        stream.seek(0)
+        return stream.read().decode(locale.getpreferredencoding(False), errors="replace")
+
+    def _terminate_process_tree(self, process: subprocess.Popen[str]) -> None:
+        if os.name == "nt":
+            try:
+                process.send_signal(signal.CTRL_BREAK_EVENT)
+                process.wait(timeout=1)
+                return
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+            subprocess.run(
+                ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                text=True,
+                capture_output=True,
+                timeout=2,
+                check=False,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            if process.poll() is None:
+                process.kill()
+            return
+        try:
+            os.killpg(process.pid, 9)
+        except (ProcessLookupError, PermissionError):
+            if process.poll() is None:
+                process.kill()
 
     def _process_result(self, completed: subprocess.CompletedProcess[str], success_label: str) -> ToolResult:
         output = "\n".join(
@@ -401,6 +550,12 @@ class LocalTools:
         blocked = ["rm -rf /", "del /s", "format ", "shutdown", "powershell -enc"]
         if any(token in normalized for token in blocked):
             raise ToolError(f"Blocked potentially destructive command: {command}")
+        background = re.search(r"(?<!&)&(?!&)", command) or "start /b" in normalized or "start-process" in normalized
+        if background:
+            raise ToolError(
+                "Background services are not supported by run_command because they can keep the tool output open. "
+                "Use a finite validation command that starts, probes, and stops the service in one foreground process."
+            )
         try:
             parts = shlex.split(command, posix=os.name != "nt")
         except ValueError:

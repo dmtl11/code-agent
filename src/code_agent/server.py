@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from .agent import CodingAgent
+from .code_registry import CodeRegistry, IGNORED_PARTS, TEXT_SUFFIXES
 from .config import PROVIDER_DEFAULTS, load_llm_config
 from .session_store import SessionStore
 
@@ -50,6 +51,10 @@ class DemoHandler(SimpleHTTPRequestHandler):
 
         if parsed.path == "/api/reviews/merge":
             self._merge_reviews()
+            return
+
+        if parsed.path == "/api/reviews/rollback":
+            self._rollback_reviews()
             return
 
         if parsed.path == "/api/file":
@@ -120,7 +125,7 @@ class DemoHandler(SimpleHTTPRequestHandler):
         def emit(event: dict[str, Any]) -> None:
             persisted_event = {**event, "run_id": run_id}
             store.append_event(session_id, persisted_event)
-            if event.get("type") in {"llm_call", "llm_error", "tool_result", "context"}:
+            if event.get("type") in {"route", "llm_call", "llm_error", "tool_result", "context"}:
                 store.record_metric(session_id, persisted_event)
             self._write_ndjson(persisted_event)
 
@@ -205,7 +210,7 @@ class DemoHandler(SimpleHTTPRequestHandler):
             if any(change["status"] != "pending" for change in changes):
                 raise ValueError("Only pending review changes can be merged.")
 
-            merged: dict[str, str] = {}
+            merged: dict[str, tuple[bool, str]] = {}
             grouped: dict[str, list[dict[str, Any]]] = {}
             for change in changes:
                 grouped.setdefault(change["path"], []).append(change)
@@ -213,26 +218,98 @@ class DemoHandler(SimpleHTTPRequestHandler):
                 path = self._resolve_workspace_path(workspace, raw_path, require_file=False)
                 path_changes.sort(key=lambda item: item["id"])
                 latest = path_changes[-1]
-                current = path.read_text(encoding="utf-8") if path.is_file() else ""
-                if current not in {latest["before_content"], latest["after_content"]}:
+                current_exists = path.is_file()
+                current = path.read_text(encoding="utf-8") if current_exists else ""
+                matches_before = current_exists == latest["before_exists"] and current == latest["before_content"]
+                matches_after = current_exists == latest["after_exists"] and current == latest["after_content"]
+                if not (matches_before or matches_after):
                     raise ValueError(
                         f"Conflict in {raw_path}: the workspace changed after this review. Refresh the review first."
                     )
-                merged[raw_path] = latest["after_content"]
+                merged[raw_path] = (latest["after_exists"], latest["after_content"])
 
-            for raw_path, content in merged.items():
+            for raw_path, (exists, content) in merged.items():
                 path = self._resolve_workspace_path(workspace, raw_path, require_file=False)
-                if path.suffix.lower() == ".py":
+                if exists and path.suffix.lower() == ".py":
                     ast.parse(content, filename=raw_path)
 
-            for raw_path, content in merged.items():
-                path = self._resolve_workspace_path(workspace, raw_path, require_file=False)
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text(content, encoding="utf-8")
+            self._write_review_states(workspace, merged)
             store.mark_review_changes_merged(session_id, change_ids)
             self._json({"ok": True, "session_id": session_id, "change_ids": change_ids, "paths": list(merged)})
-        except (ValueError, TypeError, SyntaxError) as exc:
+        except (ValueError, TypeError, SyntaxError, OSError) as exc:
             self._json({"ok": False, "error": str(exc)}, status=409)
+
+    def _rollback_reviews(self) -> None:
+        try:
+            payload = self._read_json_body()
+            session_id = str(payload.get("session_id") or "").strip()
+            raw_ids = payload.get("change_ids")
+            if not session_id or not isinstance(raw_ids, list) or not raw_ids:
+                raise ValueError("Select at least one review change to roll back.")
+            change_ids = sorted({int(value) for value in raw_ids})
+            store = SessionStore()
+            session = store.get_session(session_id)
+            if not session:
+                self._json({"ok": False, "error": "Session not found"}, status=404)
+                return
+            workspace = Path(session["workspace"]).resolve()
+            changes = store.get_review_changes(session_id, change_ids)
+            if len(changes) != len(change_ids):
+                raise ValueError("One or more review changes do not belong to this session.")
+            if any(change["status"] != "pending" for change in changes):
+                raise ValueError("Only pending review changes can be rolled back.")
+
+            targets: dict[str, tuple[bool, str]] = {}
+            grouped: dict[str, list[dict[str, Any]]] = {}
+            for change in changes:
+                grouped.setdefault(change["path"], []).append(change)
+            for raw_path, path_changes in grouped.items():
+                path_changes.sort(key=lambda item: item["id"])
+                earliest = path_changes[0]
+                latest = path_changes[-1]
+                path = self._resolve_workspace_path(workspace, raw_path, require_file=False)
+                current_exists = path.is_file()
+                current = path.read_text(encoding="utf-8") if current_exists else ""
+                if current_exists != latest["after_exists"] or current != latest["after_content"]:
+                    raise ValueError(
+                        f"Rollback conflict in {raw_path}: the file changed after the selected review."
+                    )
+                targets[raw_path] = (earliest["before_exists"], earliest["before_content"])
+
+            for raw_path, (exists, content) in targets.items():
+                if exists and Path(raw_path).suffix.lower() == ".py":
+                    ast.parse(content, filename=raw_path)
+            self._write_review_states(workspace, targets)
+            store.mark_review_changes_rolled_back(session_id, change_ids)
+            self._json({"ok": True, "session_id": session_id, "change_ids": change_ids, "paths": list(targets)})
+        except (ValueError, TypeError, SyntaxError, OSError) as exc:
+            self._json({"ok": False, "error": str(exc)}, status=409)
+
+    def _write_review_states(self, workspace: Path, targets: dict[str, tuple[bool, str]]) -> None:
+        originals: dict[str, tuple[bool, str]] = {}
+        for raw_path in targets:
+            path = self._resolve_workspace_path(workspace, raw_path, require_file=False)
+            originals[raw_path] = (path.is_file(), path.read_text(encoding="utf-8") if path.is_file() else "")
+        try:
+            for raw_path, (exists, content) in targets.items():
+                path = self._resolve_workspace_path(workspace, raw_path, require_file=False)
+                if exists:
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text(content, encoding="utf-8")
+                elif path.exists():
+                    path.unlink()
+        except Exception:
+            for raw_path, (exists, content) in originals.items():
+                path = self._resolve_workspace_path(workspace, raw_path, require_file=False)
+                if exists:
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text(content, encoding="utf-8")
+                elif path.exists():
+                    path.unlink()
+            raise
+        registry = CodeRegistry(workspace)
+        for raw_path in targets:
+            registry.update_file(self._resolve_workspace_path(workspace, raw_path, require_file=False))
 
     def _record_review_changes(
         self,
@@ -247,7 +324,7 @@ class DemoHandler(SimpleHTTPRequestHandler):
         for raw_path in sorted(set(before) | set(after)):
             before_content = before.get(raw_path, "")
             after_content = after.get(raw_path, "")
-            if before_content == after_content:
+            if before_content == after_content and (raw_path in before) == (raw_path in after):
                 continue
             change_id = store.add_review_change(
                 session_id,
@@ -255,17 +332,18 @@ class DemoHandler(SimpleHTTPRequestHandler):
                 raw_path,
                 before_content,
                 after_content,
+                before_exists=raw_path in before,
+                after_exists=raw_path in after,
             )
             changes.append({"id": change_id, "run_id": run_id, "path": raw_path, "status": "pending"})
         return changes
 
     def _snapshot_workspace(self, workspace: Path) -> dict[str, str]:
-        extensions = {".py", ".cpp", ".cc", ".cxx", ".h", ".hpp", ".js", ".jsx", ".ts", ".tsx", ".html", ".css", ".json"}
         snapshot: dict[str, str] = {}
         if not workspace.exists():
             return snapshot
         for path in workspace.rglob("*"):
-            if not path.is_file() or path.suffix.lower() not in extensions:
+            if not path.is_file() or path.suffix.lower() not in TEXT_SUFFIXES:
                 continue
             rel = path.relative_to(workspace)
             if any(part in {".git", "__pycache__", ".venv", ".code_agent_build", ".code_agent"} for part in rel.parts):
@@ -288,6 +366,7 @@ class DemoHandler(SimpleHTTPRequestHandler):
                 raise ValueError(f"Path escapes workspace: {raw_path}")
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(content, encoding="utf-8")
+            CodeRegistry(workspace).update_file(path)
             self._json({"ok": True, "path": raw_path, "size": path.stat().st_size})
         except Exception as exc:
             self._json({"ok": False, "error": str(exc)}, status=500)
@@ -338,6 +417,7 @@ class DemoHandler(SimpleHTTPRequestHandler):
 
         if parsed.path == "/api/providers":
             labels = {
+                "auto": "Auto (Qwen-first)",
                 "deepseek": "DeepSeek",
                 "openai": "ChatGPT (CloseAI)",
                 "claude": "Claude (CloseAI)",
@@ -350,8 +430,9 @@ class DemoHandler(SimpleHTTPRequestHandler):
                         {
                             "id": provider,
                             "label": labels[provider],
-                            "protocol": load_llm_config(provider=provider).protocol,
+                            "protocol": "router" if provider == "auto" else load_llm_config(provider=provider).protocol,
                             "default_model": load_llm_config(provider=provider).model,
+                            "context_tokens": load_llm_config(provider=provider).context_tokens,
                         }
                         for provider in labels
                     ],
@@ -510,7 +591,7 @@ class DemoHandler(SimpleHTTPRequestHandler):
         files: list[dict[str, Any]] = []
         for path in sorted(root.rglob("*")):
             rel = path.relative_to(root)
-            if any(part in {".git", "__pycache__", ".venv", ".code_agent_build"} for part in rel.parts):
+            if any(part in IGNORED_PARTS for part in rel.parts):
                 continue
             if path.is_file():
                 files.append(

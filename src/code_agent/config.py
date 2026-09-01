@@ -9,6 +9,7 @@ ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_ENV_FILE = ROOT / "config" / "llm.env"
 
 PROVIDER_ALIASES = {
+    "auto": "auto",
     "deepseek": "deepseek",
     "openai": "openai",
     "chatgpt": "openai",
@@ -19,6 +20,15 @@ PROVIDER_ALIASES = {
 }
 
 PROVIDER_DEFAULTS = {
+    "auto": {
+        "base_url": "",
+        "model": "auto-cascade",
+        "api_key_names": (),
+        "base_url_names": (),
+        "model_names": ("CODE_AGENT_AUTO_MODEL",),
+        "protocol_names": (),
+        "protocol": "openai",
+    },
     "deepseek": {
         "base_url": "https://api.deepseek.com/v1",
         "model": "deepseek-chat",
@@ -124,7 +134,7 @@ def load_llm_config(
     if protocol not in {"openai", "anthropic"}:
         raise ValueError("CODE_AGENT_PROTOCOL must be 'openai' or 'anthropic'.")
 
-    context_tokens = _read_int("CODE_AGENT_CONTEXT_TOKENS", values, 16000, minimum=4000)
+    context_tokens = _read_int("CODE_AGENT_CONTEXT_TOKENS", values, 32000, minimum=4000)
     repo_map_chars = _read_int("CODE_AGENT_REPO_MAP_CHARS", values, 6000, minimum=800)
 
     return LLMConfig(

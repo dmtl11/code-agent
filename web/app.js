@@ -27,9 +27,11 @@ const reviewCountEl = document.querySelector("#review-count");
 const reviewSummaryEl = document.querySelector("#review-summary");
 const reviewRefreshButton = document.querySelector("#review-refresh");
 const reviewMergeButton = document.querySelector("#review-merge");
+const reviewRollbackButton = document.querySelector("#review-rollback");
 const monitorScopeEl = document.querySelector("#monitor-scope");
 const monitorKpisEl = document.querySelector("#monitor-kpis");
 const monitorProvidersEl = document.querySelector("#monitor-providers");
+const monitorRoutesEl = document.querySelector("#monitor-routes");
 const monitorToolsEl = document.querySelector("#monitor-tools");
 const monitorErrorsEl = document.querySelector("#monitor-errors");
 const monitorRefreshButton = document.querySelector("#monitor-refresh");
@@ -69,6 +71,7 @@ reviewTab.addEventListener("click", () => switchPanel("review"));
 monitorTab.addEventListener("click", () => switchPanel("monitor"));
 reviewRefreshButton.addEventListener("click", refreshReviews);
 reviewMergeButton.addEventListener("click", mergeSelectedReviews);
+reviewRollbackButton.addEventListener("click", rollbackSelectedReviews);
 monitorRefreshButton.addEventListener("click", refreshMonitoring);
 
 refreshButton.addEventListener("click", refreshFiles);
@@ -153,8 +156,10 @@ async function loadProviders() {
 function updateProviderHint() {
   const provider = providerCatalog.get(providerEl.value);
   if (!provider) return;
-  const protocol = provider.protocol === "anthropic" ? "Anthropic" : "OpenAI-compatible";
-  providerHintEl.textContent = `${protocol} · ${provider.default_model}`;
+  const protocol = provider.protocol === "router"
+    ? "Smart cascade"
+    : provider.protocol === "anthropic" ? "Anthropic" : "OpenAI-compatible";
+  providerHintEl.textContent = `${protocol} · ${provider.default_model} · ${formatTokens(provider.context_tokens || 0)} context`;
 }
 
 async function readEventStream(body) {
@@ -259,7 +264,7 @@ function renderReviews() {
   }
   for (const change of reviewChanges) {
     const item = document.createElement("li");
-    item.className = `review-item ${change.status === "merged" ? "merged" : ""}`;
+    item.className = `review-item ${change.status !== "pending" ? "resolved" : ""}`;
     const head = document.createElement("div");
     head.className = "review-item-head";
     const checkbox = document.createElement("input");
@@ -284,6 +289,7 @@ function renderReviews() {
 }
 
 function reviewDiff(change) {
+  if (typeof change.diff === "string" && change.diff) return change.diff;
   const before = String(change.before_preview || "").split("\n");
   const after = String(change.after_preview || "").split("\n");
   if (before.join("\n") === after.join("\n")) return "No textual difference.";
@@ -298,6 +304,29 @@ function reviewDiff(change) {
 function updateReviewControls() {
   const selected = reviewsEl.querySelectorAll("input[type=checkbox]:checked");
   reviewMergeButton.disabled = selected.length < 2;
+  reviewRollbackButton.disabled = selected.length < 1;
+}
+
+async function rollbackSelectedReviews() {
+  const selected = [...reviewsEl.querySelectorAll("input[type=checkbox]:checked")].map((input) => Number(input.dataset.reviewId));
+  if (!selected.length) return;
+  reviewRollbackButton.disabled = true;
+  try {
+    const response = await fetch("/api/reviews/rollback", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ session_id: sessionId, change_ids: selected }),
+    });
+    const payload = await response.json();
+    if (!response.ok || !payload.ok) throw new Error(payload.error || "Rollback failed");
+    terminalEl.textContent = `Rolled back ${payload.paths.join(", ")}.`;
+    await refreshReviews();
+    await refreshFiles();
+    if (activeFile) await openFile({ path: activeFile, language: languageEl.textContent });
+  } catch (error) {
+    reviewSummaryEl.textContent = error.message;
+    updateReviewControls();
+  }
 }
 
 async function mergeSelectedReviews() {
@@ -333,6 +362,7 @@ async function refreshMonitoring() {
     monitorScopeEl.textContent = error.message;
     monitorKpisEl.innerHTML = '<div class="empty">Monitoring data unavailable.</div>';
     monitorProvidersEl.innerHTML = "";
+    monitorRoutesEl.innerHTML = "";
     monitorToolsEl.innerHTML = "";
     monitorErrorsEl.innerHTML = "";
   }
@@ -350,9 +380,11 @@ function renderMonitoring(payload) {
     [`${summary.prompt_cache_hit_rate || 0}%`, "prompt cache hit"],
     [summary.tool_calls || 0, `tool calls · ${summary.tool_error_rate || 0}% errors`],
     [summary.compactions || 0, "context compactions"],
+    [summary.route_decisions || 0, `auto routes · ${summary.route_fallbacks || 0} fallback(s)`],
   ];
   monitorKpisEl.innerHTML = cards.map(([value, label]) => `<div class="monitor-kpi"><strong>${escapeHtml(value)}</strong><span>${escapeHtml(label)}</span></div>`).join("");
   renderMetricRows(monitorProvidersEl, payload.providers || [], (item) => `${item.name} · ${item.requests} request(s)`, (item) => `${item.total_tokens} tokens · ${item.error_rate}% errors · ${item.avg_latency_ms} ms avg`);
+  renderMetricRows(monitorRoutesEl, payload.routes || [], (item) => item.name, (item) => `${item.requests} selection(s) · ${item.error_rate}% used fallback`);
   renderMetricRows(monitorToolsEl, payload.tools || [], (item) => item.name, (item) => `${item.requests} call(s) · ${item.error_rate}% errors`);
   monitorErrorsEl.innerHTML = "";
   const errors = payload.recent_errors || [];
@@ -540,7 +572,14 @@ function addEvent(event) {
   pre.textContent = bodyFor(event);
   item.append(title, pre);
   eventsEl.append(item);
+  scrollEventsToBottom();
+}
+
+function scrollEventsToBottom() {
   eventsEl.scrollTop = eventsEl.scrollHeight;
+  requestAnimationFrame(() => {
+    eventsEl.scrollTop = eventsEl.scrollHeight;
+  });
 }
 
 function removeEmptyEvent() {
@@ -560,13 +599,14 @@ function formatTokens(value) {
 }
 
 function shouldDisplayEvent(event) {
-  return ["user", "assistant", "final", "error"].includes(event.type);
+  return ["user", "assistant", "final", "error", "route"].includes(event.type);
 }
 
 function titleFor(event) {
   if (event.type === "assistant") return "Assistant";
   if (event.type === "final") return event.ok ? "Final" : "Failed";
   if (event.type === "user") return "You";
+  if (event.type === "route") return "Auto Route";
   return "Error";
 }
 
@@ -574,6 +614,12 @@ function bodyFor(event) {
   if (event.type === "assistant") return event.content || "";
   if (event.type === "final") return event.content || "";
   if (event.type === "user") return event.content || "";
+  if (event.type === "route") {
+    const selected = `${event.selected_provider || "unavailable"} / ${event.selected_model || "unknown"}`;
+    const reason = Array.isArray(event.reasons) ? event.reasons.join(", ") : "task score";
+    const fallback = event.fallback_count ? ` · ${event.fallback_count} fallback(s)` : "";
+    return `${selected}\n${event.stage || "auto"} · score ${event.score ?? 0}${fallback}\n${reason}`;
+  }
   return event.message || "Unknown error";
 }
 
@@ -581,6 +627,7 @@ function className(event) {
   if (event.type === "error") return "error";
   if (event.type === "assistant") return "assistant";
   if (event.type === "user") return "user";
+  if (event.type === "route") return "route";
   return "";
 }
 

@@ -316,6 +316,12 @@ select {
   overflow: hidden;
 }
 
+.chat-view {
+  display: grid;
+  grid-template-rows: minmax(0, 1fr);
+  min-width: 0;
+}
+
 .monitor-view {
   min-height: 0;
   overflow: auto;
@@ -452,7 +458,7 @@ select {
   background: var(--soft);
 }
 
-.review-item.merged {
+.review-item.resolved {
   opacity: 0.62;
 }
 
@@ -494,7 +500,10 @@ select {
 }
 
 .events {
+  min-height: 0;
+  height: 100%;
   overflow: auto;
+  overscroll-behavior: contain;
   padding: 14px;
   display: flex;
   flex-direction: column;
@@ -529,6 +538,15 @@ select {
 .event.user {
   border-color: #c7d2fe;
   background: #f8fafc;
+}
+
+.event.route {
+  border-left: 3px solid #0f766e;
+  background: #f0fdfa;
+}
+
+.event.route strong {
+  color: #0f766e;
 }
 
 .event.tool strong {

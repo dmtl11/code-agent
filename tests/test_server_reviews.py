@@ -62,6 +62,38 @@ class ReviewEndpointTests(unittest.TestCase):
         self.assertEqual(path.read_text(encoding="utf-8"), "print(3)\n")
         self.assertTrue(all(item["status"] == "merged" for item in self.store.list_review_changes(self.session_id)))
 
+    def test_rollback_endpoint_restores_selected_changes_and_detects_conflicts(self) -> None:
+        path = self.workspace / "app.py"
+        path.write_text("print(3)\n", encoding="utf-8")
+        first_id = self.store.add_review_change(self.session_id, "run-1", "app.py", "print(1)\n", "print(2)\n")
+        second_id = self.store.add_review_change(self.session_id, "run-2", "app.py", "print(2)\n", "print(3)\n")
+
+        url = f"http://127.0.0.1:{self.server.server_address[1]}/api/reviews/rollback"
+        request = urllib.request.Request(
+            url,
+            data=json.dumps({"session_id": self.session_id, "change_ids": [first_id, second_id]}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(request) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+        self.assertTrue(payload["ok"])
+        self.assertEqual(path.read_text(encoding="utf-8"), "print(1)\n")
+        self.assertTrue(all(item["status"] == "rolled_back" for item in self.store.list_review_changes(self.session_id)))
+
+        conflict_id = self.store.add_review_change(self.session_id, "run-3", "app.py", "print(1)\n", "print(4)\n")
+        path.write_text("print(5)\n", encoding="utf-8")
+        conflict_request = urllib.request.Request(
+            url,
+            data=json.dumps({"session_id": self.session_id, "change_ids": [conflict_id]}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with self.assertRaises(urllib.error.HTTPError) as raised:
+            urllib.request.urlopen(conflict_request)
+        self.assertEqual(raised.exception.code, 409)
+        self.assertEqual(path.read_text(encoding="utf-8"), "print(5)\n")
+
     def test_monitoring_endpoint_returns_project_metrics(self) -> None:
         self.store.record_metric(
             self.session_id,

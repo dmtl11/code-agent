@@ -9,6 +9,7 @@ from .config import load_llm_config
 from .context import ContextManager
 from .memory import format_memory
 from .model import ChatModel
+from .model_router import AutoRoutingModel
 from .repo_map import RepoMap
 from .session_store import SessionStore
 from .tools import LocalTools
@@ -22,10 +23,13 @@ give short progress notes and concise conclusions."""
 MODE_PROMPTS = {
     "code": """Mode: CODE. Complete the task iteratively:
 1. inspect relevant files before editing and run lint_file on relevant Python/C++ files when useful,
-2. prefer replace_in_file for focused changes; use write_file mainly for new or small files,
+2. use apply_patch for coordinated or multi-file edits and dry_run it when risk is non-trivial;
+   use replace_in_file for one small unique block and write_file mainly for new or small files,
 3. make minimal focused changes,
 4. run lint_file and a relevant verification command after editing, then react to failures,
 5. call finish with a concise summary and verification result.
+On Windows, run_command uses cmd.exe. Do not use Bash-only syntax such as sleep, pkill, or a bare '&'.
+Commands must finish by themselves; do not launch persistent background services with start /b or Start-Process.
 Do not ask the user to do work that you can do with tools.""",
     "ask": """Mode: ASK. Answer questions about the repository. You may inspect files, but you must not
 edit files or execute commands. Cite file paths and line numbers from read_file when useful, then call finish.""",
@@ -34,6 +38,7 @@ files, interfaces, risks, and verification steps. Do not edit files or execute c
 }
 
 PROVIDER_IDENTITIES = {
+    "auto": "Auto Router",
     "deepseek": "DeepSeek",
     "openai": "ChatGPT (through CloseAI)",
     "claude": "Claude (through CloseAI)",
@@ -48,7 +53,7 @@ class CodingAgent:
     def __init__(
         self,
         workspace: str | Path,
-        max_turns: int = 12,
+        max_turns: int = 24,
         sink: EventSink | None = None,
         mode: str = "code",
         context_tokens: int | None = None,
@@ -68,14 +73,19 @@ class CodingAgent:
         self.session_store = session_store
         self.session_id = session_id
         self.tools = LocalTools(self.workspace, mode=mode, repo_map_chars=config.repo_map_chars)
-        self.model = model or ChatModel(config=config)
+        if model is not None:
+            self.model = model
+        elif config.provider == "auto":
+            self.model = AutoRoutingModel(env_file=config.env_file)
+        else:
+            self.model = ChatModel(config=config)
         self.context = ContextManager(max_tokens=context_tokens or config.context_tokens)
         self.repo_map_chars = config.repo_map_chars
         self.sink = sink or (lambda event: None)
         self.last_exchange: list[dict[str, str]] = []
 
     def run(self, task: str, history: list[dict[str, Any]] | None = None) -> str:
-        repo_map = RepoMap(self.workspace).build(task, self.repo_map_chars)
+        repo_map = RepoMap(self.workspace, self.tools.registry).build(task, self.repo_map_chars)
         checkpoint = None
         interrupted_tools = ""
         if self.session_store and self.session_id:
@@ -147,11 +157,13 @@ class CodingAgent:
             try:
                 assistant = self.model.complete(messages, self.tools.schema())
             except Exception as exc:
+                self._emit_route(step)
+                actual_provider, actual_model = self._active_model_identity()
                 self.sink(
                     {
                         "type": "llm_error",
-                        "provider": self.provider,
-                        "model": self.model_name,
+                        "provider": actual_provider,
+                        "model": actual_model,
                         "step": step,
                         "ok": False,
                         "latency_ms": round((perf_counter() - model_started) * 1000, 2),
@@ -160,6 +172,8 @@ class CodingAgent:
                 )
                 raise
             latency_ms = round((perf_counter() - model_started) * 1000, 2)
+            self._emit_route(step)
+            actual_provider, actual_model = self._active_model_identity()
             usage = dict(getattr(self.model, "last_usage", {}) or {})
             usage_source = getattr(self.model, "last_usage_source", "unavailable")
             if not usage:
@@ -172,8 +186,8 @@ class CodingAgent:
             self.sink(
                 {
                     "type": "llm_call",
-                    "provider": self.provider,
-                    "model": self.model_name,
+                    "provider": actual_provider,
+                    "model": actual_model,
                     "step": step,
                     "ok": True,
                     "latency_ms": latency_ms,
@@ -270,6 +284,31 @@ class CodingAgent:
                 self.session_store.update_memory(self.session_id, task, final, messages)
             self.session_store.touch_session(self.session_id, self.provider, self.model_name)
         return final
+
+    def _emit_route(self, step: int) -> None:
+        route = dict(getattr(self.model, "last_route", {}) or {})
+        if not route:
+            return
+        attempts = route.get("attempts") or []
+        self.sink(
+            {
+                "type": "route",
+                **route,
+                "provider": route.get("selected_provider") or "auto",
+                "model": route.get("selected_model") or self.model_name,
+                "step": step,
+                "ok": bool(route.get("selected_provider")),
+                "error": "; ".join(
+                    f"{item.get('provider')}: {item.get('error')}" for item in attempts
+                ),
+            }
+        )
+
+    def _active_model_identity(self) -> tuple[str, str]:
+        return (
+            str(getattr(self.model, "last_provider", self.provider)),
+            str(getattr(self.model, "last_model", self.model_name)),
+        )
 
     def _parse_args(self, raw_args: str) -> dict[str, Any]:
         try:

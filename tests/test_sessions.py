@@ -62,6 +62,8 @@ class SessionFeatureTests(unittest.TestCase):
         reviews = store.list_review_changes(session_id)
         self.assertEqual({review["id"] for review in reviews}, {first_id, second_id})
         self.assertEqual(reviews[0]["after_preview"], "print(3)\n")
+        self.assertIn("--- a/app.py", reviews[0]["diff"])
+        self.assertIn("+print(3)", reviews[0]["diff"])
         store.mark_review_changes_merged(session_id, [first_id, second_id])
         self.assertTrue(all(review["status"] == "merged" for review in store.list_review_changes(session_id)))
 
