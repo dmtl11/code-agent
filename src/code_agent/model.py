@@ -24,6 +24,8 @@ class ChatModel:
         self.api_key = config.api_key
         self.api_key_env_names = config.api_key_env_names
         self.env_file = config.env_file
+        self.last_usage: dict[str, int] = {}
+        self.last_usage_source = "unavailable"
 
     def complete(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> dict[str, Any]:
         if not self.api_key:
@@ -39,6 +41,8 @@ class ChatModel:
             body, headers, endpoint = self._openai_request(messages, tools)
 
         payload = self._post_json(endpoint, body, headers)
+        self.last_usage = self._normalize_usage(payload.get("usage"))
+        self.last_usage_source = "actual" if self.last_usage else "unavailable"
         if self.protocol == "anthropic":
             return self._normalize_anthropic_response(payload)
         return self._normalize_openai_response(payload)
@@ -163,6 +167,35 @@ class ChatModel:
             return payload["choices"][0]["message"]
         except (KeyError, IndexError, TypeError) as exc:
             raise ModelError(f"Unexpected model response: {payload}") from exc
+
+    @staticmethod
+    def _normalize_usage(usage: Any) -> dict[str, int]:
+        if not isinstance(usage, dict):
+            return {}
+        prompt = usage.get("prompt_tokens", usage.get("input_tokens", 0))
+        completion = usage.get("completion_tokens", usage.get("output_tokens", 0))
+        total = usage.get("total_tokens", (prompt or 0) + (completion or 0))
+        try:
+            normalized = {
+                "prompt_tokens": max(0, int(prompt or 0)),
+                "completion_tokens": max(0, int(completion or 0)),
+                "total_tokens": max(0, int(total or 0)),
+            }
+        except (TypeError, ValueError):
+            return {}
+        for source, target in (("prompt_cache_hit_tokens", "prompt_cache_hit_tokens"), ("prompt_cache_miss_tokens", "prompt_cache_miss_tokens")):
+            if source in usage:
+                try:
+                    normalized[target] = max(0, int(usage[source] or 0))
+                except (TypeError, ValueError):
+                    pass
+        prompt_details = usage.get("prompt_tokens_details")
+        if isinstance(prompt_details, dict) and "cached_tokens" in prompt_details:
+            try:
+                normalized["prompt_cache_hit_tokens"] = max(0, int(prompt_details["cached_tokens"] or 0))
+            except (TypeError, ValueError):
+                pass
+        return normalized
 
     @staticmethod
     def _normalize_anthropic_response(payload: dict[str, Any]) -> dict[str, Any]:

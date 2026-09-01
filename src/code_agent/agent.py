@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import json
+from time import perf_counter
 from pathlib import Path
 from typing import Any, Callable
 
 from .config import load_llm_config
 from .context import ContextManager
+from .memory import format_memory
 from .model import ChatModel
 from .repo_map import RepoMap
+from .session_store import SessionStore
 from .tools import LocalTools
 
 
@@ -51,6 +54,8 @@ class CodingAgent:
         context_tokens: int | None = None,
         model: Any | None = None,
         provider: str | None = None,
+        session_store: SessionStore | None = None,
+        session_id: str | None = None,
     ) -> None:
         if mode not in VALID_MODES:
             raise ValueError(f"Unknown mode: {mode}")
@@ -60,6 +65,8 @@ class CodingAgent:
         self.mode = mode
         self.provider = config.provider
         self.model_name = config.model
+        self.session_store = session_store
+        self.session_id = session_id
         self.tools = LocalTools(self.workspace, mode=mode, repo_map_chars=config.repo_map_chars)
         self.model = model or ChatModel(config=config)
         self.context = ContextManager(max_tokens=context_tokens or config.context_tokens)
@@ -69,6 +76,13 @@ class CodingAgent:
 
     def run(self, task: str, history: list[dict[str, Any]] | None = None) -> str:
         repo_map = RepoMap(self.workspace).build(task, self.repo_map_chars)
+        checkpoint = None
+        interrupted_tools = ""
+        if self.session_store and self.session_id:
+            self.session_store.recover_interrupted_tools(self.session_id)
+            self.session_store.append_message(self.session_id, {"role": "user", "content": task})
+            checkpoint = self.session_store.latest_checkpoint(self.session_id)
+            interrupted_tools = self.session_store.interrupted_tool_summary(self.session_id)
         clean_history, history_note = self.context.prepare_history(history)
 
         if self.mode == "context":
@@ -82,10 +96,15 @@ class CodingAgent:
                     "truncated_tool_results": 0,
                 }
             )
-            return self._finish(task, f"{repo_map}\n\nEstimated retained context: {estimated} tokens.")
+            return self._finish(task, f"{repo_map}\n\nEstimated retained context: {estimated} tokens.", clean_history)
 
         context_note = history_note or "No earlier chat messages were omitted or compacted."
         identity = PROVIDER_IDENTITIES.get(self.provider, self.provider)
+        durable_memory = format_memory(
+            self.session_store.get_memory(self.session_id) if self.session_store and self.session_id else None,
+            checkpoint.get("summary", "") if checkpoint else "",
+            interrupted_tools,
+        )
         messages: list[dict[str, Any]] = [
             {
                 "role": "system",
@@ -98,11 +117,13 @@ class CodingAgent:
             },
             {"role": "system", "content": repo_map},
             {"role": "system", "content": context_note},
+            {"role": "system", "content": durable_memory},
             *clean_history,
             {"role": "user", "content": task},
         ]
         context_note_index = 2
-        base_count = len(messages)
+        base_count = 4
+        preserve_from = base_count + len(clean_history)
         compacted_summary: list[str] = []
 
         for step in range(1, self.max_turns + 1):
@@ -111,11 +132,58 @@ class CodingAgent:
                 base_count,
                 context_note_index,
                 compacted_summary,
+                preserve_from=preserve_from,
             )
             self.sink(stats.event())
+            if stats.compacted_blocks and self.session_store and self.session_id:
+                self.session_store.save_checkpoint(
+                    self.session_id,
+                    "\n".join(compacted_summary[-12:]),
+                    messages[base_count:],
+                    stats.estimated_tokens,
+                )
             self.sink({"type": "step", "step": step, "message": "asking model"})
-            assistant = self.model.complete(messages, self.tools.schema())
+            model_started = perf_counter()
+            try:
+                assistant = self.model.complete(messages, self.tools.schema())
+            except Exception as exc:
+                self.sink(
+                    {
+                        "type": "llm_error",
+                        "provider": self.provider,
+                        "model": self.model_name,
+                        "step": step,
+                        "ok": False,
+                        "latency_ms": round((perf_counter() - model_started) * 1000, 2),
+                        "error": f"{type(exc).__name__}: {exc}",
+                    }
+                )
+                raise
+            latency_ms = round((perf_counter() - model_started) * 1000, 2)
+            usage = dict(getattr(self.model, "last_usage", {}) or {})
+            usage_source = getattr(self.model, "last_usage_source", "unavailable")
+            if not usage:
+                usage = {
+                    "prompt_tokens": self.context.estimate_tokens(messages),
+                    "completion_tokens": self.context.estimate_tokens(assistant),
+                }
+                usage["total_tokens"] = usage["prompt_tokens"] + usage["completion_tokens"]
+                usage_source = "estimated"
+            self.sink(
+                {
+                    "type": "llm_call",
+                    "provider": self.provider,
+                    "model": self.model_name,
+                    "step": step,
+                    "ok": True,
+                    "latency_ms": latency_ms,
+                    "usage": usage,
+                    "usage_source": usage_source,
+                }
+            )
             messages.append(assistant)
+            if self.session_store and self.session_id:
+                self.session_store.append_message(self.session_id, assistant)
 
             content = assistant.get("content")
             if content:
@@ -123,38 +191,84 @@ class CodingAgent:
 
             tool_calls = assistant.get("tool_calls") or []
             if not tool_calls:
-                return self._finish(task, content or "Model stopped without a final message.")
+                return self._finish(task, content or "Model stopped without a final message.", messages)
 
             for tool_call in tool_calls:
                 name = tool_call.get("function", {}).get("name", "")
                 raw_args = tool_call.get("function", {}).get("arguments") or "{}"
                 args = self._parse_args(raw_args)
                 self.sink({"type": "tool_call", "name": name, "arguments": args})
+                call_id = str(tool_call.get("id") or f"{name}-{step}")
+                if self.session_store and self.session_id:
+                    self.session_store.create_tool_call(self.session_id, call_id, name, args)
+                    self.session_store.update_tool_call(self.session_id, call_id, "running")
+                tool_started = perf_counter()
                 result = self.tools.call(name, args)
-                self.sink({"type": "tool_result", "name": name, "ok": result.ok, "output": result.output})
+                self.sink(
+                    {
+                        "type": "tool_result",
+                        "name": name,
+                        "call_id": call_id,
+                        "ok": result.ok,
+                        "latency_ms": round((perf_counter() - tool_started) * 1000, 2),
+                        "output": result.output,
+                    }
+                )
+                if self.session_store and self.session_id:
+                    self.session_store.update_tool_call(
+                        self.session_id,
+                        call_id,
+                        "completed" if result.ok else "failed",
+                        result.output,
+                    )
 
                 if name == "finish":
+                    finish_result = {
+                        "role": "tool",
+                        "tool_call_id": call_id,
+                        "name": name,
+                        "content": result.to_message(),
+                    }
+                    messages.append(finish_result)
+                    if self.session_store and self.session_id:
+                        self.session_store.append_message(self.session_id, finish_result)
+                        self.session_store.append_message(
+                            self.session_id,
+                            {"role": "assistant", "content": result.output},
+                        )
+                        self.session_store.update_memory(self.session_id, task, result.output, messages)
                     return self._finish(task, result.output)
 
                 messages.append(
                     {
                         "role": "tool",
-                        "tool_call_id": tool_call.get("id", name),
+                        "tool_call_id": call_id,
                         "name": name,
                         "content": result.to_message(),
                     }
                 )
+                if self.session_store and self.session_id:
+                    self.session_store.append_message(self.session_id, messages[-1])
 
+        final = (
+            f"Stopped after max_turns={self.max_turns}. Increase --max-turns if the task is larger."
+        )
+        if self.session_store and self.session_id:
+            self.session_store.update_memory(self.session_id, task, final, messages)
         return self._finish(
             task,
-            f"Stopped after max_turns={self.max_turns}. Increase --max-turns if the task is larger.",
+            final,
         )
 
-    def _finish(self, task: str, final: str) -> str:
+    def _finish(self, task: str, final: str, messages: list[dict[str, Any]] | None = None) -> str:
         self.last_exchange = [
             {"role": "user", "content": task},
             {"role": "assistant", "content": final},
         ]
+        if self.session_store and self.session_id:
+            if messages is not None:
+                self.session_store.update_memory(self.session_id, task, final, messages)
+            self.session_store.touch_session(self.session_id, self.provider, self.model_name)
         return final
 
     def _parse_args(self, raw_args: str) -> dict[str, Any]:

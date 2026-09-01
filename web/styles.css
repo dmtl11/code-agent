@@ -227,8 +227,14 @@ select {
   min-width: 0;
   min-height: 0;
   display: grid;
-  grid-template-rows: 64px 28px minmax(0, 1fr) 124px;
+  grid-template-rows: 64px 52px minmax(0, 1fr);
   background: var(--panel);
+}
+
+.agent-subhead {
+  display: flex;
+  align-items: stretch;
+  border-bottom: 1px solid var(--line);
 }
 
 .mode-switch {
@@ -262,14 +268,229 @@ select {
 }
 
 .context-status {
+  flex: 1;
   padding: 5px 14px;
   overflow: hidden;
-  border-bottom: 1px solid var(--line);
   color: var(--muted);
   background: var(--soft);
   font-size: 11px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.panel-tabs {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 6px 10px 6px 0;
+}
+
+.panel-tabs button {
+  border: 0;
+  border-radius: 6px;
+  padding: 6px 9px;
+  color: var(--muted);
+  background: transparent;
+  font-size: 12px;
+}
+
+.panel-tabs button.active {
+  color: var(--ink);
+  background: var(--accent-soft);
+}
+
+.panel-tabs button {
+  white-space: nowrap;
+}
+
+.agent-body {
+  grid-row: 3;
+  min-height: 0;
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) 124px;
+}
+
+.chat-view,
+.review-view {
+  min-height: 0;
+  overflow: hidden;
+}
+
+.monitor-view {
+  min-height: 0;
+  overflow: auto;
+  padding: 12px 14px;
+}
+
+.monitor-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 10px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.monitor-toolbar button {
+  padding: 6px 8px;
+  font-size: 12px;
+}
+
+.monitor-kpis {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.monitor-kpi {
+  min-width: 0;
+  padding: 9px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--soft);
+}
+
+.monitor-kpi strong,
+.monitor-kpi span {
+  display: block;
+}
+
+.monitor-kpi strong {
+  font-size: 17px;
+}
+
+.monitor-kpi span {
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.monitor-section {
+  margin-top: 14px;
+}
+
+.monitor-section h3 {
+  margin: 0 0 7px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.monitor-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.monitor-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  padding: 8px 9px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fff;
+}
+
+.monitor-row strong,
+.monitor-row span {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.monitor-row strong {
+  font-size: 12px;
+}
+
+.monitor-row span {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.monitor-error {
+  border-left: 3px solid var(--error);
+}
+
+.review-view {
+  padding: 12px 14px;
+  overflow: auto;
+}
+
+.review-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 10px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.review-toolbar button {
+  padding: 6px 8px;
+  font-size: 12px;
+}
+
+.reviews {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.review-item {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px;
+  background: var(--soft);
+}
+
+.review-item.merged {
+  opacity: 0.62;
+}
+
+.review-item-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.review-item-head label {
+  flex: 1;
+  margin: 0;
+  color: var(--ink);
+  font-size: 12px;
+  text-transform: none;
+}
+
+.review-meta {
+  display: block;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.review-diff {
+  max-height: 180px;
+  overflow: auto;
+  margin: 8px 0 0;
+  padding: 8px;
+  border: 1px solid var(--line);
+  background: #fff;
+  color: #374151;
+  font: 11px/1.45 "Cascadia Code", Consolas, monospace;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.composer {
+  grid-row: 2;
 }
 
 .events {
@@ -406,5 +627,16 @@ select {
   .agent-panel {
     grid-column: 2;
     grid-row: 2;
+  }
+}
+
+@media (max-width: 520px) {
+  .panel-tabs {
+    padding-right: 6px;
+  }
+
+  .panel-tabs button {
+    padding-left: 5px;
+    padding-right: 5px;
   }
 }

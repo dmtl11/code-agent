@@ -56,26 +56,68 @@
           </div>
           <button id="clear" type="button" title="清空对话">Clear</button>
         </div>
-        <div id="context-status" class="context-status">Context ready</div>
-        <ol id="events" class="events">
-          <li class="empty">Ask the agent to change code in this workspace.</li>
-        </ol>
-        <section class="composer">
-          <div class="composer-main">
-            <div class="composer-toolbar">
-              <label for="provider">Model</label>
-              <select id="provider" title="选择本次请求使用的大模型">
-                <option value="deepseek">DeepSeek</option>
-                <option value="openai">ChatGPT (CloseAI)</option>
-                <option value="claude">Claude (CloseAI)</option>
-                <option value="qwen">Qwen</option>
-              </select>
-              <span id="provider-hint">OpenAI-compatible · deepseek-chat</span>
-            </div>
-            <textarea id="task">Create a hello world Python script and run it.</textarea>
+        <div class="agent-subhead">
+          <div id="context-status" class="context-status">Context ready</div>
+          <div class="panel-tabs" role="tablist" aria-label="Agent panels">
+            <button id="chat-tab" class="active" type="button" role="tab">Chat</button>
+            <button id="review-tab" type="button" role="tab">Review <span id="review-count"></span></button>
+            <button id="monitor-tab" type="button" role="tab">Monitor</button>
           </div>
-          <button id="run" class="run" type="button">Run</button>
-        </section>
+        </div>
+        <div class="agent-body">
+          <div id="chat-view" class="chat-view">
+            <ol id="events" class="events">
+              <li class="empty">Ask the agent to change code in this workspace.</li>
+            </ol>
+          </div>
+          <section id="review-view" class="review-view" hidden>
+            <div class="review-toolbar">
+              <span id="review-summary">No changes to review.</span>
+              <div>
+                <button id="review-refresh" type="button" title="刷新审查变更">Refresh</button>
+                <button id="review-merge" type="button" disabled title="合并选中的两次或多次修改">Merge selected</button>
+              </div>
+            </div>
+            <ol id="reviews" class="reviews">
+              <li class="empty">Run the agent to create review changes.</li>
+            </ol>
+          </section>
+          <section id="monitor-view" class="monitor-view" hidden>
+            <div class="monitor-toolbar">
+              <span id="monitor-scope">Workspace monitor</span>
+              <button id="monitor-refresh" type="button" title="刷新监控数据">Refresh</button>
+            </div>
+            <div id="monitor-kpis" class="monitor-kpis"></div>
+            <section class="monitor-section">
+              <h3>By model</h3>
+              <div id="monitor-providers" class="monitor-list"></div>
+            </section>
+            <section class="monitor-section">
+              <h3>By tool</h3>
+              <div id="monitor-tools" class="monitor-list"></div>
+            </section>
+            <section class="monitor-section">
+              <h3>Recent errors</h3>
+              <div id="monitor-errors" class="monitor-list"></div>
+            </section>
+          </section>
+          <section class="composer">
+            <div class="composer-main">
+              <div class="composer-toolbar">
+                <label for="provider">Model</label>
+                <select id="provider" title="选择本次请求使用的大模型">
+                  <option value="deepseek">DeepSeek</option>
+                  <option value="openai">ChatGPT (CloseAI)</option>
+                  <option value="claude">Claude (CloseAI)</option>
+                  <option value="qwen">Qwen</option>
+                </select>
+                <span id="provider-hint">OpenAI-compatible · deepseek-chat</span>
+              </div>
+              <textarea id="task">Create a hello world Python script and run it.</textarea>
+            </div>
+            <button id="run" class="run" type="button">Run</button>
+          </section>
+        </div>
       </aside>
     </main>
     <script src="./app.js?v=20260830-1700"></script>

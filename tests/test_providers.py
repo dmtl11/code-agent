@@ -173,6 +173,21 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(body["messages"][-1]["content"][0]["type"], "tool_result")
         self.assertEqual(result["tool_calls"][0]["function"]["name"], "finish")
         self.assertEqual(json.loads(result["tool_calls"][0]["function"]["arguments"]), {"summary": "Done"})
+        self.assertEqual(model.last_usage, {})
+
+    def test_usage_is_normalized_for_monitoring(self) -> None:
+        usage = ChatModel._normalize_usage(
+            {
+                "prompt_tokens": 100,
+                "completion_tokens": 20,
+                "total_tokens": 120,
+                "prompt_tokens_details": {"cached_tokens": 60},
+            }
+        )
+        self.assertEqual(usage["prompt_tokens"], 100)
+        self.assertEqual(usage["completion_tokens"], 20)
+        self.assertEqual(usage["total_tokens"], 120)
+        self.assertEqual(usage["prompt_cache_hit_tokens"], 60)
 
 
 if __name__ == "__main__":

@@ -1,17 +1,21 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 import os
 import shutil
 import subprocess
+from time import perf_counter
 import urllib.parse
+import uuid
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
 from .agent import CodingAgent
 from .config import PROVIDER_DEFAULTS, load_llm_config
+from .session_store import SessionStore
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -30,8 +34,22 @@ class DemoHandler(SimpleHTTPRequestHandler):
 
     def do_POST(self) -> None:
         parsed = urllib.parse.urlparse(self.path)
+        if parsed.path.startswith("/api/sessions/") and parsed.path.endswith("/clear"):
+            session_id = parsed.path.split("/")[3]
+            store = SessionStore()
+            if not store.get_session(session_id):
+                self._json({"ok": False, "error": "Session not found"}, status=404)
+                return
+            store.clear_session(session_id)
+            self._json({"ok": True, "session_id": session_id})
+            return
+
         if parsed.path == "/api/run-stream":
             self._run_agent_stream()
+            return
+
+        if parsed.path == "/api/reviews/merge":
+            self._merge_reviews()
             return
 
         if parsed.path == "/api/file":
@@ -72,12 +90,27 @@ class DemoHandler(SimpleHTTPRequestHandler):
         task = str(payload.get("task") or "Create a hello world Python script and run it.")
         mode = str(payload.get("mode") or "code")
         provider = str(payload.get("provider") or "").strip() or None
-        history = payload.get("history") if isinstance(payload.get("history"), list) else []
         try:
             workspace = self._resolve_workspace(str(payload.get("workspace") or "workspace"))
         except ValueError as exc:
             self._json({"ok": False, "error": str(exc)}, status=400)
             return
+
+        store = SessionStore()
+        session_id = str(payload.get("session_id") or "").strip()
+        session = store.get_session(session_id) if session_id else None
+        if session_id and not session:
+            self._json({"ok": False, "error": f"Session not found: {session_id}"}, status=404)
+            return
+        if session and Path(session["workspace"]).resolve() != workspace.resolve():
+            self._json({"ok": False, "error": "Session belongs to a different workspace."}, status=400)
+            return
+        if not session:
+            session_id = store.create_session(str(workspace), provider or "", "")
+        history = store.load_messages(session_id)
+        run_id = f"run_{uuid.uuid4().hex[:16]}"
+        before_snapshot = self._snapshot_workspace(workspace)
+        run_started = perf_counter()
 
         self.send_response(200)
         self.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
@@ -85,23 +118,163 @@ class DemoHandler(SimpleHTTPRequestHandler):
         self.end_headers()
 
         def emit(event: dict[str, Any]) -> None:
-            self._write_ndjson(event)
+            persisted_event = {**event, "run_id": run_id}
+            store.append_event(session_id, persisted_event)
+            if event.get("type") in {"llm_call", "llm_error", "tool_result", "context"}:
+                store.record_metric(session_id, persisted_event)
+            self._write_ndjson(persisted_event)
 
         try:
-            agent = CodingAgent(workspace, sink=emit, mode=mode, provider=provider)
+            self._write_ndjson({"type": "session", "session_id": session_id})
+            agent = CodingAgent(
+                workspace,
+                sink=emit,
+                mode=mode,
+                provider=provider,
+                session_store=store,
+                session_id=session_id,
+            )
             final = agent.run(task, history=history)
+            review_changes = self._record_review_changes(store, session_id, run_id, before_snapshot, workspace)
+            store.record_metric(
+                session_id,
+                {
+                    "kind": "run",
+                    "run_id": run_id,
+                    "provider": agent.provider,
+                    "model": agent.model_name,
+                    "ok": True,
+                    "latency_ms": round((perf_counter() - run_started) * 1000, 2),
+                },
+            )
             self._write_ndjson(
                 {
                     "type": "final",
                     "ok": True,
                     "content": final,
                     "workspace": str(workspace),
+                    "session_id": session_id,
+                    "memory": store.get_memory(session_id),
                     "exchange": agent.last_exchange,
+                    "review_changes": review_changes,
                 }
             )
         except Exception as exc:
+            review_changes = self._record_review_changes(store, session_id, run_id, before_snapshot, workspace)
+            store.record_metric(
+                session_id,
+                {
+                    "kind": "run",
+                    "run_id": run_id,
+                    "provider": provider or "",
+                    "model": "",
+                    "ok": False,
+                    "latency_ms": round((perf_counter() - run_started) * 1000, 2),
+                    "error": f"{type(exc).__name__}: {exc}",
+                },
+            )
             self._write_ndjson({"type": "error", "message": f"{type(exc).__name__}: {exc}"})
-            self._write_ndjson({"type": "final", "ok": False, "content": str(exc), "workspace": str(workspace)})
+            self._write_ndjson(
+                {
+                    "type": "final",
+                    "ok": False,
+                    "content": str(exc),
+                    "workspace": str(workspace),
+                    "session_id": session_id,
+                    "review_changes": review_changes,
+                }
+            )
+
+    def _merge_reviews(self) -> None:
+        try:
+            payload = self._read_json_body()
+            session_id = str(payload.get("session_id") or "").strip()
+            raw_ids = payload.get("change_ids")
+            if not session_id or not isinstance(raw_ids, list) or len(raw_ids) < 2:
+                raise ValueError("Select at least two review changes to merge.")
+            change_ids = sorted({int(value) for value in raw_ids})
+            store = SessionStore()
+            session = store.get_session(session_id)
+            if not session:
+                self._json({"ok": False, "error": "Session not found"}, status=404)
+                return
+            workspace = Path(session["workspace"]).resolve()
+            changes = store.get_review_changes(session_id, change_ids)
+            if len(changes) != len(change_ids):
+                raise ValueError("One or more review changes do not belong to this session.")
+            if any(change["status"] != "pending" for change in changes):
+                raise ValueError("Only pending review changes can be merged.")
+
+            merged: dict[str, str] = {}
+            grouped: dict[str, list[dict[str, Any]]] = {}
+            for change in changes:
+                grouped.setdefault(change["path"], []).append(change)
+            for raw_path, path_changes in grouped.items():
+                path = self._resolve_workspace_path(workspace, raw_path, require_file=False)
+                path_changes.sort(key=lambda item: item["id"])
+                latest = path_changes[-1]
+                current = path.read_text(encoding="utf-8") if path.is_file() else ""
+                if current not in {latest["before_content"], latest["after_content"]}:
+                    raise ValueError(
+                        f"Conflict in {raw_path}: the workspace changed after this review. Refresh the review first."
+                    )
+                merged[raw_path] = latest["after_content"]
+
+            for raw_path, content in merged.items():
+                path = self._resolve_workspace_path(workspace, raw_path, require_file=False)
+                if path.suffix.lower() == ".py":
+                    ast.parse(content, filename=raw_path)
+
+            for raw_path, content in merged.items():
+                path = self._resolve_workspace_path(workspace, raw_path, require_file=False)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(content, encoding="utf-8")
+            store.mark_review_changes_merged(session_id, change_ids)
+            self._json({"ok": True, "session_id": session_id, "change_ids": change_ids, "paths": list(merged)})
+        except (ValueError, TypeError, SyntaxError) as exc:
+            self._json({"ok": False, "error": str(exc)}, status=409)
+
+    def _record_review_changes(
+        self,
+        store: SessionStore,
+        session_id: str,
+        run_id: str,
+        before: dict[str, str],
+        workspace: Path,
+    ) -> list[dict[str, Any]]:
+        after = self._snapshot_workspace(workspace)
+        changes: list[dict[str, Any]] = []
+        for raw_path in sorted(set(before) | set(after)):
+            before_content = before.get(raw_path, "")
+            after_content = after.get(raw_path, "")
+            if before_content == after_content:
+                continue
+            change_id = store.add_review_change(
+                session_id,
+                run_id,
+                raw_path,
+                before_content,
+                after_content,
+            )
+            changes.append({"id": change_id, "run_id": run_id, "path": raw_path, "status": "pending"})
+        return changes
+
+    def _snapshot_workspace(self, workspace: Path) -> dict[str, str]:
+        extensions = {".py", ".cpp", ".cc", ".cxx", ".h", ".hpp", ".js", ".jsx", ".ts", ".tsx", ".html", ".css", ".json"}
+        snapshot: dict[str, str] = {}
+        if not workspace.exists():
+            return snapshot
+        for path in workspace.rglob("*"):
+            if not path.is_file() or path.suffix.lower() not in extensions:
+                continue
+            rel = path.relative_to(workspace)
+            if any(part in {".git", "__pycache__", ".venv", ".code_agent_build", ".code_agent"} for part in rel.parts):
+                continue
+            try:
+                snapshot[rel.as_posix()] = path.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                continue
+        return snapshot
 
     def _save_file(self) -> None:
         try:
@@ -131,6 +304,38 @@ class DemoHandler(SimpleHTTPRequestHandler):
 
     def do_GET(self) -> None:
         parsed = urllib.parse.urlparse(self.path)
+        if parsed.path.startswith("/api/sessions/"):
+            session_id = parsed.path.split("/")[3]
+            store = SessionStore()
+            session = store.get_session(session_id)
+            if not session:
+                self._json({"ok": False, "error": "Session not found"}, status=404)
+                return
+            self._json(
+                {
+                    "ok": True,
+                    "session": session,
+                    "messages": store.load_messages(session_id),
+                    "memory": store.get_memory(session_id),
+                    "checkpoint": store.latest_checkpoint(session_id),
+                    "reviews": store.list_review_changes(session_id),
+                }
+            )
+            return
+
+        if parsed.path == "/api/reviews":
+            params = urllib.parse.parse_qs(parsed.query)
+            session_id = str(params.get("session_id", [""])[0]).strip()
+            if not session_id:
+                self._json({"ok": False, "error": "session_id is required"}, status=400)
+                return
+            store = SessionStore()
+            if not store.get_session(session_id):
+                self._json({"ok": False, "error": "Session not found"}, status=404)
+                return
+            self._json({"ok": True, "reviews": store.list_review_changes(session_id)})
+            return
+
         if parsed.path == "/api/providers":
             labels = {
                 "deepseek": "DeepSeek",
@@ -152,6 +357,25 @@ class DemoHandler(SimpleHTTPRequestHandler):
                     ],
                 }
             )
+            return
+
+        if parsed.path == "/api/monitoring":
+            params = urllib.parse.parse_qs(parsed.query)
+            workspace_name = str(params.get("workspace", [""])[0]).strip()
+            session_id = str(params.get("session_id", [""])[0]).strip() or None
+            try:
+                workspace = self._resolve_workspace(workspace_name) if workspace_name else None
+                store = SessionStore()
+                if session_id and not store.get_session(session_id):
+                    self._json({"ok": False, "error": "Session not found"}, status=404)
+                    return
+                summary = store.monitoring_summary(
+                    session_id=session_id,
+                    workspace=str(workspace) if workspace else None,
+                )
+                self._json({"ok": True, "scope": "session" if session_id else "workspace", **summary})
+            except ValueError as exc:
+                self._json({"ok": False, "error": str(exc)}, status=400)
             return
 
         if parsed.path == "/api/files":
@@ -262,12 +486,12 @@ class DemoHandler(SimpleHTTPRequestHandler):
             output += f"\n{label} succeeded and produced no output."
         return {"ok": completed.returncode == 0, "output": output}
 
-    def _resolve_workspace_path(self, workspace: Path, raw_path: str) -> Path:
+    def _resolve_workspace_path(self, workspace: Path, raw_path: str, require_file: bool = True) -> Path:
         root = workspace.resolve()
         path = (root / raw_path).resolve()
         if path != root and root not in path.parents:
             raise ValueError(f"Path escapes workspace: {raw_path}")
-        if not path.is_file():
+        if require_file and not path.is_file():
             raise ValueError(f"Not a file: {raw_path}")
         return path
 

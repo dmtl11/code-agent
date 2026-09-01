@@ -16,19 +16,39 @@ const modeButtons = document.querySelectorAll("#mode-switch [data-mode]");
 const contextStatusEl = document.querySelector("#context-status");
 const providerEl = document.querySelector("#provider");
 const providerHintEl = document.querySelector("#provider-hint");
+const chatTab = document.querySelector("#chat-tab");
+const reviewTab = document.querySelector("#review-tab");
+const monitorTab = document.querySelector("#monitor-tab");
+const chatView = document.querySelector("#chat-view");
+const reviewView = document.querySelector("#review-view");
+const monitorView = document.querySelector("#monitor-view");
+const reviewsEl = document.querySelector("#reviews");
+const reviewCountEl = document.querySelector("#review-count");
+const reviewSummaryEl = document.querySelector("#review-summary");
+const reviewRefreshButton = document.querySelector("#review-refresh");
+const reviewMergeButton = document.querySelector("#review-merge");
+const monitorScopeEl = document.querySelector("#monitor-scope");
+const monitorKpisEl = document.querySelector("#monitor-kpis");
+const monitorProvidersEl = document.querySelector("#monitor-providers");
+const monitorToolsEl = document.querySelector("#monitor-tools");
+const monitorErrorsEl = document.querySelector("#monitor-errors");
+const monitorRefreshButton = document.querySelector("#monitor-refresh");
 let activeFile = "";
 let openFileRequestId = 0;
 let activeMode = "code";
 let conversationHistory = [];
 let providerCatalog = new Map();
-let conversationHistoryByProvider = new Map();
-let previousProvider = providerEl.value;
+let sessionId = localStorage.getItem("code-agent-session-id") || "";
+let reviewChanges = [];
 
-clearButton.addEventListener("click", () => {
+clearButton.addEventListener("click", async () => {
   eventsEl.innerHTML = '<li class="empty">Ask the agent to change code in this workspace.</li>';
   conversationHistory = [];
-  conversationHistoryByProvider.set(providerEl.value, []);
   contextStatusEl.textContent = "Context ready";
+  if (sessionId) {
+    await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/clear`, { method: "POST" });
+  }
+  await refreshReviews();
 });
 
 modeButtons.forEach((button) => {
@@ -41,11 +61,15 @@ modeButtons.forEach((button) => {
 });
 
 providerEl.addEventListener("change", () => {
-  conversationHistoryByProvider.set(previousProvider, conversationHistory);
-  previousProvider = providerEl.value;
-  conversationHistory = conversationHistoryByProvider.get(providerEl.value) || [];
   updateProviderHint();
 });
+
+chatTab.addEventListener("click", () => switchPanel("chat"));
+reviewTab.addEventListener("click", () => switchPanel("review"));
+monitorTab.addEventListener("click", () => switchPanel("monitor"));
+reviewRefreshButton.addEventListener("click", refreshReviews);
+reviewMergeButton.addEventListener("click", mergeSelectedReviews);
+monitorRefreshButton.addEventListener("click", refreshMonitoring);
 
 refreshButton.addEventListener("click", refreshFiles);
 workspaceEl.addEventListener("change", () => {
@@ -73,6 +97,7 @@ runButton.addEventListener("click", async () => {
         workspace: workspaceEl.value,
         mode: activeMode,
         provider: providerEl.value,
+        session_id: sessionId,
         history: conversationHistory,
       }),
     });
@@ -80,13 +105,18 @@ runButton.addEventListener("click", async () => {
       throw new Error(`HTTP ${response.status}`);
     }
     const finalEvent = await readEventStream(response.body);
+    if (finalEvent?.session_id) {
+      sessionId = finalEvent.session_id;
+      localStorage.setItem("code-agent-session-id", sessionId);
+    }
     if (finalEvent?.ok && Array.isArray(finalEvent.exchange)) {
       conversationHistory.push(...finalEvent.exchange);
       conversationHistory = conversationHistory.slice(-20);
-      conversationHistoryByProvider.set(providerEl.value, conversationHistory);
     }
     statusEl.textContent = "done";
     await refreshFiles();
+    await refreshReviews();
+    await refreshMonitoring();
   } catch (error) {
     addEvent({ type: "error", message: error.message });
     statusEl.textContent = "error";
@@ -97,6 +127,7 @@ runButton.addEventListener("click", async () => {
 
 refreshFiles();
 loadProviders();
+restoreSession();
 
 async function loadProviders() {
   try {
@@ -142,6 +173,10 @@ async function readEventStream(body) {
       if (!line.trim()) continue;
       const event = JSON.parse(line);
       addEvent(event);
+      if (event.type === "session" && event.session_id) {
+        sessionId = event.session_id;
+        localStorage.setItem("code-agent-session-id", sessionId);
+      }
       if (event.type === "final") finalEvent = event;
       if (event.type === "final" && !event.ok) statusEl.textContent = "error";
     }
@@ -153,6 +188,206 @@ async function readEventStream(body) {
     if (event.type === "final") finalEvent = event;
   }
   return finalEvent;
+}
+
+async function restoreSession() {
+  if (!sessionId) return;
+  try {
+    const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}`);
+    if (!response.ok) throw new Error("Session unavailable");
+    const payload = await response.json();
+    conversationHistory = (payload.messages || [])
+      .filter((message) => ["user", "assistant"].includes(message.role) && !message.tool_calls && typeof message.content === "string")
+      .slice(-20);
+    if (!conversationHistory.length) return;
+    removeEmptyEvent();
+    for (const message of conversationHistory) {
+      addEvent({ type: message.role, content: message.content });
+    }
+    const memory = payload.memory || {};
+    const memoryItems = (memory.completed_tasks || []).length;
+    contextStatusEl.textContent = `Session restored · ${memoryItems} completed task(s)`;
+    await refreshReviews();
+    await refreshMonitoring();
+  } catch (error) {
+    localStorage.removeItem("code-agent-session-id");
+    sessionId = "";
+  }
+}
+
+function switchPanel(panel) {
+  const review = panel === "review";
+  const monitor = panel === "monitor";
+  chatTab.classList.toggle("active", !review && !monitor);
+  reviewTab.classList.toggle("active", review);
+  monitorTab.classList.toggle("active", monitor);
+  chatView.hidden = review || monitor;
+  reviewView.hidden = !review;
+  monitorView.hidden = !monitor;
+  if (monitor) refreshMonitoring();
+}
+
+async function refreshReviews() {
+  if (!sessionId) {
+    reviewChanges = [];
+    renderReviews();
+    return;
+  }
+  try {
+    const response = await fetch(`/api/reviews?session_id=${encodeURIComponent(sessionId)}`);
+    const payload = await response.json();
+    if (!response.ok || !payload.ok) throw new Error(payload.error || "Cannot load reviews");
+    reviewChanges = payload.reviews || [];
+    renderReviews();
+  } catch (error) {
+    reviewChanges = [];
+    reviewSummaryEl.textContent = error.message;
+    reviewsEl.innerHTML = `<li class="empty">${escapeHtml(error.message)}</li>`;
+    updateReviewControls();
+  }
+}
+
+function renderReviews() {
+  reviewsEl.innerHTML = "";
+  const pending = reviewChanges.filter((change) => change.status === "pending");
+  reviewSummaryEl.textContent = pending.length ? `${pending.length} change(s) waiting for review.` : "No changes to review.";
+  reviewCountEl.textContent = pending.length ? `(${pending.length})` : "";
+  if (!reviewChanges.length) {
+    reviewsEl.innerHTML = '<li class="empty">Run the agent to create review changes.</li>';
+    updateReviewControls();
+    return;
+  }
+  for (const change of reviewChanges) {
+    const item = document.createElement("li");
+    item.className = `review-item ${change.status === "merged" ? "merged" : ""}`;
+    const head = document.createElement("div");
+    head.className = "review-item-head";
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.dataset.reviewId = change.id;
+    checkbox.disabled = change.status !== "pending";
+    checkbox.addEventListener("change", updateReviewControls);
+    const label = document.createElement("label");
+    label.textContent = change.path;
+    const meta = document.createElement("span");
+    meta.className = "review-meta";
+    meta.textContent = `${change.status} · ${change.run_id}`;
+    label.append(meta);
+    head.append(checkbox, label);
+    const diff = document.createElement("pre");
+    diff.className = "review-diff";
+    diff.textContent = reviewDiff(change);
+    item.append(head, diff);
+    reviewsEl.append(item);
+  }
+  updateReviewControls();
+}
+
+function reviewDiff(change) {
+  const before = String(change.before_preview || "").split("\n");
+  const after = String(change.after_preview || "").split("\n");
+  if (before.join("\n") === after.join("\n")) return "No textual difference.";
+  return [
+    "--- before",
+    ...before.map((line) => `- ${line}`),
+    "+++ after",
+    ...after.map((line) => `+ ${line}`),
+  ].join("\n");
+}
+
+function updateReviewControls() {
+  const selected = reviewsEl.querySelectorAll("input[type=checkbox]:checked");
+  reviewMergeButton.disabled = selected.length < 2;
+}
+
+async function mergeSelectedReviews() {
+  const selected = [...reviewsEl.querySelectorAll("input[type=checkbox]:checked")].map((input) => Number(input.dataset.reviewId));
+  if (selected.length < 2) return;
+  reviewMergeButton.disabled = true;
+  try {
+    const response = await fetch("/api/reviews/merge", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ session_id: sessionId, change_ids: selected }),
+    });
+    const payload = await response.json();
+    if (!response.ok || !payload.ok) throw new Error(payload.error || "Merge failed");
+    terminalEl.textContent = `Merged ${payload.paths.join(", ")}.`;
+    await refreshReviews();
+    if (activeFile) await openFile({ path: activeFile, language: languageEl.textContent });
+  } catch (error) {
+    reviewSummaryEl.textContent = error.message;
+    updateReviewControls();
+  }
+}
+
+async function refreshMonitoring() {
+  const params = new URLSearchParams({ workspace: workspaceEl.value });
+  if (sessionId) params.set("session_id", sessionId);
+  try {
+    const response = await fetch(`/api/monitoring?${params}`);
+    const payload = await response.json();
+    if (!response.ok || !payload.ok) throw new Error(payload.error || "Cannot load monitoring");
+    renderMonitoring(payload);
+  } catch (error) {
+    monitorScopeEl.textContent = error.message;
+    monitorKpisEl.innerHTML = '<div class="empty">Monitoring data unavailable.</div>';
+    monitorProvidersEl.innerHTML = "";
+    monitorToolsEl.innerHTML = "";
+    monitorErrorsEl.innerHTML = "";
+  }
+}
+
+function renderMonitoring(payload) {
+  const summary = payload.summary || {};
+  monitorScopeEl.textContent = payload.scope === "session" ? "Session monitor" : "Workspace monitor";
+  const cards = [
+    [summary.llm_requests || 0, "LLM requests"],
+    [`${summary.llm_error_rate || 0}%`, "LLM error rate"],
+    [`${summary.run_error_rate || 0}%`, "run error rate"],
+    [formatTokens(summary.total_tokens || 0), `tokens · ${summary.actual_usage_calls || 0} actual`],
+    [`${summary.avg_latency_ms || 0} ms`, `average latency · p95 ${summary.p95_latency_ms || 0} ms`],
+    [`${summary.prompt_cache_hit_rate || 0}%`, "prompt cache hit"],
+    [summary.tool_calls || 0, `tool calls · ${summary.tool_error_rate || 0}% errors`],
+    [summary.compactions || 0, "context compactions"],
+  ];
+  monitorKpisEl.innerHTML = cards.map(([value, label]) => `<div class="monitor-kpi"><strong>${escapeHtml(value)}</strong><span>${escapeHtml(label)}</span></div>`).join("");
+  renderMetricRows(monitorProvidersEl, payload.providers || [], (item) => `${item.name} · ${item.requests} request(s)`, (item) => `${item.total_tokens} tokens · ${item.error_rate}% errors · ${item.avg_latency_ms} ms avg`);
+  renderMetricRows(monitorToolsEl, payload.tools || [], (item) => item.name, (item) => `${item.requests} call(s) · ${item.error_rate}% errors`);
+  monitorErrorsEl.innerHTML = "";
+  const errors = payload.recent_errors || [];
+  if (!errors.length) {
+    monitorErrorsEl.innerHTML = '<div class="empty">No recent errors.</div>';
+    return;
+  }
+  for (const error of errors) {
+    const row = document.createElement("div");
+    row.className = "monitor-row monitor-error";
+    const title = document.createElement("strong");
+    title.textContent = error.kind || "error";
+    const detail = document.createElement("span");
+    detail.textContent = error.error || "Unknown error";
+    row.append(title, detail);
+    monitorErrorsEl.append(row);
+  }
+}
+
+function renderMetricRows(container, rows, title, detail) {
+  container.innerHTML = "";
+  if (!rows.length) {
+    container.innerHTML = '<div class="empty">No data yet.</div>';
+    return;
+  }
+  for (const metric of rows) {
+    const row = document.createElement("div");
+    row.className = "monitor-row";
+    const name = document.createElement("strong");
+    name.textContent = title(metric);
+    const metadata = document.createElement("span");
+    metadata.textContent = detail(metric);
+    row.append(name, metadata);
+    container.append(row);
+  }
 }
 
 async function refreshFiles() {
