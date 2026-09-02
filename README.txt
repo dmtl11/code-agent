@@ -1,4 +1,4 @@
-Git 仓库地址：待创建公开仓库后填写。
+Git 仓库地址：https://github.com/dmtl11/code-agent
 
 项目简介：
 这是一个从零实现的轻量 Coding Agent Harness。项目不依赖 LangChain、LlamaIndex、OpenAI Agents SDK、AutoGen、CrewAI 等 Agent 框架，自行完成消息管理、工具定义、模型输出解析、循环终止、错误处理和本地执行。模型通过 config/llm.env 接入 DeepSeek、Qwen，以及通过 CloseAI 中转的 ChatGPT 和 Claude。

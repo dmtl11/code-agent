@@ -231,12 +231,15 @@ code-agent/
     server.py                   网页与 API 服务
   web/                          文件树、编辑器、Chat、Review、Monitor
   tests/                        本地回归测试
-  docs/                         技术说明、演示图与迭代报告
+  docs/                         公开说明、架构图与迭代报告
   PROJECT_OVERVIEW.txt           项目实现简述
 ```
 
 ## 安全与边界
 
+- Git 采用顶层目录白名单：只收录项目源码、前端、测试、配置模板与配套说明。新生成的顶层项目目录默认忽略；新增正式源码目录时需主动更新 `.gitignore`。
+- `config/` 仅公开 `llm.env.example`，其中 API Key 必须留空。真实配置、生成的 Demo、Session 数据库、服务日志、依赖与构建产物留在本地；Word、PPT、PDF 不随代码发布。
+- `.gitignore` 不能清除已提交的历史。公开已有仓库前还需检查旧提交；若真实密钥曾被推送，应撤销并更换，而不只是删除文件。
 - 这是面向本机开发与实验的原型，不是多用户生产服务。建议只监听 `127.0.0.1`。
 - 文件工具校验工作区路径，命令工具有常见危险模式拦截与超时，但这**不等于操作系统沙箱**；启动的代码拥有当前用户权限。
 - Session 持久化的是任务记录，不代表原进程能断点续跑；服务重启后不会仅凭历史 PID 接管其他程序。
@@ -246,7 +249,7 @@ code-agent/
 ## 延伸阅读
 
 - [约 900 字项目说明](PROJECT_OVERVIEW.txt)
-- [三张架构图与可编辑 PPT](docs/architecture-slides/)
+- [三张架构示意图](docs/architecture-slides/)
 - [项目迭代报告](docs/code-agent-iteration-report.md)
 - [Hermes：持久笔记、用户信息与会话快照](https://hermes-agent.nousresearch.com/docs/user-guide/which-file-does-what)
 - [Claude Code：上下文窗口与压缩](https://code.claude.com/docs/en/how-claude-code-works)
