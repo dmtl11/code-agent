@@ -1,5 +1,6 @@
 const eventsEl = document.querySelector("#events");
 const filesEl = document.querySelector("#files");
+const fileCountEl = document.querySelector("#file-count");
 const statusEl = document.querySelector("#status");
 const runButton = document.querySelector("#run");
 const clearButton = document.querySelector("#clear");
@@ -14,6 +15,7 @@ const runFileButton = document.querySelector("#run-file");
 const terminalEl = document.querySelector("#terminal");
 const modeButtons = document.querySelectorAll("#mode-switch [data-mode]");
 const contextStatusEl = document.querySelector("#context-status");
+const agentViewTitleEl = document.querySelector("#agent-view-title");
 const providerEl = document.querySelector("#provider");
 const providerHintEl = document.querySelector("#provider-hint");
 const chatTab = document.querySelector("#chat-tab");
@@ -42,9 +44,16 @@ let conversationHistory = [];
 let providerCatalog = new Map();
 let sessionId = localStorage.getItem("code-agent-session-id") || "";
 let reviewChanges = [];
+const collapsedFolders = new Set();
+
+const EMPTY_CHAT = `
+  <li class="empty chat-empty">
+    <strong>Start a coding task</strong>
+    <span>Ask the agent to inspect, edit, and verify this workspace.</span>
+  </li>`;
 
 clearButton.addEventListener("click", async () => {
-  eventsEl.innerHTML = '<li class="empty">Ask the agent to change code in this workspace.</li>';
+  eventsEl.innerHTML = EMPTY_CHAT;
   conversationHistory = [];
   contextStatusEl.textContent = "Context ready";
   if (sessionId) {
@@ -76,8 +85,15 @@ monitorRefreshButton.addEventListener("click", refreshMonitoring);
 
 refreshButton.addEventListener("click", refreshFiles);
 workspaceEl.addEventListener("change", () => {
+  sessionId = "";
+  localStorage.removeItem("code-agent-session-id");
+  conversationHistory = [];
+  reviewChanges = [];
+  eventsEl.innerHTML = EMPTY_CHAT;
+  contextStatusEl.textContent = "New workspace · new session";
   activeFile = "";
   resetEditor();
+  renderReviews();
   refreshFiles();
 });
 saveFileButton.addEventListener("click", saveActiveFile);
@@ -156,6 +172,10 @@ async function loadProviders() {
 function updateProviderHint() {
   const provider = providerCatalog.get(providerEl.value);
   if (!provider) return;
+  if (provider.protocol === "router") {
+    providerHintEl.textContent = `Auto · task-aware model selection · ${formatTokens(provider.context_tokens || 0)} context`;
+    return;
+  }
   const protocol = provider.protocol === "router"
     ? "Smart cascade"
     : provider.protocol === "anthropic" ? "Anthropic" : "OpenAI-compatible";
@@ -226,6 +246,10 @@ function switchPanel(panel) {
   chatTab.classList.toggle("active", !review && !monitor);
   reviewTab.classList.toggle("active", review);
   monitorTab.classList.toggle("active", monitor);
+  chatTab.setAttribute("aria-selected", String(!review && !monitor));
+  reviewTab.setAttribute("aria-selected", String(review));
+  monitorTab.setAttribute("aria-selected", String(monitor));
+  agentViewTitleEl.textContent = review ? "Review changes" : monitor ? "Run monitor" : "Workspace chat";
   chatView.hidden = review || monitor;
   reviewView.hidden = !review;
   monitorView.hidden = !monitor;
@@ -256,7 +280,7 @@ function renderReviews() {
   reviewsEl.innerHTML = "";
   const pending = reviewChanges.filter((change) => change.status === "pending");
   reviewSummaryEl.textContent = pending.length ? `${pending.length} change(s) waiting for review.` : "No changes to review.";
-  reviewCountEl.textContent = pending.length ? `(${pending.length})` : "";
+  reviewCountEl.textContent = pending.length ? pending.length : "";
   if (!reviewChanges.length) {
     reviewsEl.innerHTML = '<li class="empty">Run the agent to create review changes.</li>';
     updateReviewControls();
@@ -264,25 +288,42 @@ function renderReviews() {
   }
   for (const change of reviewChanges) {
     const item = document.createElement("li");
-    item.className = `review-item ${change.status !== "pending" ? "resolved" : ""}`;
-    const head = document.createElement("div");
-    head.className = "review-item-head";
+    const details = document.createElement("details");
+    const summary = document.createElement("summary");
+    const toggle = document.createElement("span");
     const checkbox = document.createElement("input");
+    const icon = document.createElement("span");
+    const file = document.createElement("span");
+    const fileName = document.createElement("strong");
+    const path = document.createElement("span");
+    const stats = document.createElement("span");
+    const status = document.createElement("span");
+    const diffText = reviewDiff(change);
+    const counts = diffStats(diffText);
+    item.className = "review-list-item";
+    details.className = `review-item ${change.status !== "pending" ? "resolved" : ""}`;
+    details.open = change.status === "pending";
+    toggle.className = "review-toggle";
+    toggle.textContent = "›";
     checkbox.type = "checkbox";
     checkbox.dataset.reviewId = change.id;
     checkbox.disabled = change.status !== "pending";
+    checkbox.addEventListener("click", (event) => event.stopPropagation());
     checkbox.addEventListener("change", updateReviewControls);
-    const label = document.createElement("label");
-    label.textContent = change.path;
-    const meta = document.createElement("span");
-    meta.className = "review-meta";
-    meta.textContent = `${change.status} · ${change.run_id}`;
-    label.append(meta);
-    head.append(checkbox, label);
-    const diff = document.createElement("pre");
-    diff.className = "review-diff";
-    diff.textContent = reviewDiff(change);
-    item.append(head, diff);
+    const type = fileType(change.path);
+    icon.className = `file-icon ${type.className}`;
+    icon.textContent = type.label;
+    file.className = "review-file";
+    fileName.textContent = change.path.split("/").pop();
+    path.textContent = `${change.path} · ${change.run_id}`;
+    file.append(fileName, path);
+    stats.className = "diff-stats";
+    stats.innerHTML = `<span class="diff-add-count">+${counts.added}</span><span class="diff-del-count">-${counts.removed}</span>`;
+    status.className = "review-status";
+    status.textContent = change.status;
+    summary.append(toggle, checkbox, icon, file, stats, status);
+    details.append(summary, renderDiff(diffText));
+    item.append(details);
     reviewsEl.append(item);
   }
   updateReviewControls();
@@ -299,6 +340,47 @@ function reviewDiff(change) {
     "+++ after",
     ...after.map((line) => `+ ${line}`),
   ].join("\n");
+}
+
+function diffStats(diff) {
+  const lines = String(diff || "").split("\n");
+  return {
+    added: lines.filter((line) => line.startsWith("+") && !line.startsWith("+++")).length,
+    removed: lines.filter((line) => line.startsWith("-") && !line.startsWith("---")).length,
+  };
+}
+
+function renderDiff(diff) {
+  const container = document.createElement("div");
+  container.className = "diff-view";
+  const lines = String(diff || "No textual difference.").split("\n");
+  for (const line of lines) {
+    const row = document.createElement("div");
+    const gutter = document.createElement("span");
+    const code = document.createElement("span");
+    let kind = "context";
+    let symbol = "";
+    if (line.startsWith("@@")) {
+      kind = "hunk";
+      symbol = "@@";
+    } else if (line.startsWith("+++") || line.startsWith("---")) {
+      kind = "header";
+    } else if (line.startsWith("+")) {
+      kind = "add";
+      symbol = "+";
+    } else if (line.startsWith("-")) {
+      kind = "remove";
+      symbol = "-";
+    }
+    row.className = `diff-line ${kind}`;
+    gutter.className = "diff-gutter";
+    gutter.textContent = symbol;
+    code.className = "diff-code";
+    code.textContent = line;
+    row.append(gutter, code);
+    container.append(row);
+  }
+  return container;
 }
 
 function updateReviewControls() {
@@ -372,17 +454,28 @@ function renderMonitoring(payload) {
   const summary = payload.summary || {};
   monitorScopeEl.textContent = payload.scope === "session" ? "Session monitor" : "Workspace monitor";
   const cards = [
-    [summary.llm_requests || 0, "LLM requests"],
-    [`${summary.llm_error_rate || 0}%`, "LLM error rate"],
-    [`${summary.run_error_rate || 0}%`, "run error rate"],
-    [formatTokens(summary.total_tokens || 0), `tokens · ${summary.actual_usage_calls || 0} actual`],
-    [`${summary.avg_latency_ms || 0} ms`, `average latency · p95 ${summary.p95_latency_ms || 0} ms`],
-    [`${summary.prompt_cache_hit_rate || 0}%`, "prompt cache hit"],
-    [summary.tool_calls || 0, `tool calls · ${summary.tool_error_rate || 0}% errors`],
-    [summary.compactions || 0, "context compactions"],
-    [summary.route_decisions || 0, `auto routes · ${summary.route_fallbacks || 0} fallback(s)`],
+    { value: summary.llm_requests || 0, label: "LLM requests", tone: "cyan" },
+    { value: `${summary.llm_error_rate || 0}%`, label: "LLM error rate", tone: summary.llm_errors ? "red" : "green" },
+    { value: `${summary.run_error_rate || 0}%`, label: "Run error rate", tone: summary.failed_runs ? "red" : "green" },
+    { value: formatTokens(summary.total_tokens || 0), label: `Tokens · ${summary.actual_usage_calls || 0} actual`, tone: "purple" },
+    { value: `${summary.avg_latency_ms || 0} ms`, label: `Average · p95 ${summary.p95_latency_ms || 0} ms`, tone: "amber" },
+    { value: `${summary.prompt_cache_hit_rate || 0}%`, label: "Prompt cache hit", tone: "cyan" },
+    { value: summary.tool_calls || 0, label: `Tool calls · ${summary.tool_error_rate || 0}% errors`, tone: "green" },
+    { value: summary.compactions || 0, label: "Context compactions", tone: "purple" },
+    { value: summary.route_decisions || 0, label: `Auto routes · ${summary.route_fallbacks || 0} fallback(s)`, tone: "amber" },
   ];
-  monitorKpisEl.innerHTML = cards.map(([value, label]) => `<div class="monitor-kpi"><strong>${escapeHtml(value)}</strong><span>${escapeHtml(label)}</span></div>`).join("");
+  monitorKpisEl.innerHTML = "";
+  for (const card of cards) {
+    const item = document.createElement("div");
+    const value = document.createElement("strong");
+    const label = document.createElement("span");
+    item.className = "monitor-kpi";
+    item.dataset.tone = card.tone;
+    value.textContent = card.value;
+    label.textContent = card.label;
+    item.append(value, label);
+    monitorKpisEl.append(item);
+  }
   renderMetricRows(monitorProvidersEl, payload.providers || [], (item) => `${item.name} · ${item.requests} request(s)`, (item) => `${item.total_tokens} tokens · ${item.error_rate}% errors · ${item.avg_latency_ms} ms avg`);
   renderMetricRows(monitorRoutesEl, payload.routes || [], (item) => item.name, (item) => `${item.requests} selection(s) · ${item.error_rate}% used fallback`);
   renderMetricRows(monitorToolsEl, payload.tools || [], (item) => item.name, (item) => `${item.requests} call(s) · ${item.error_rate}% errors`);
@@ -395,6 +488,7 @@ function renderMonitoring(payload) {
   for (const error of errors) {
     const row = document.createElement("div");
     row.className = "monitor-row monitor-error";
+    row.style.setProperty("--metric-width", "100%");
     const title = document.createElement("strong");
     title.textContent = error.kind || "error";
     const detail = document.createElement("span");
@@ -410,9 +504,12 @@ function renderMetricRows(container, rows, title, detail) {
     container.innerHTML = '<div class="empty">No data yet.</div>';
     return;
   }
+  const maximum = Math.max(...rows.map((metric) => Number(metric.requests || 0)), 1);
   for (const metric of rows) {
     const row = document.createElement("div");
     row.className = "monitor-row";
+    row.style.setProperty("--metric-width", `${Math.max(4, Number(metric.requests || 0) / maximum * 100)}%`);
+    row.style.setProperty("--metric-color", Number(metric.error_rate || 0) > 0 ? "var(--red)" : "var(--accent)");
     const name = document.createElement("strong");
     name.textContent = title(metric);
     const metadata = document.createElement("span");
@@ -437,28 +534,109 @@ async function refreshFiles() {
 
 function renderFiles(files) {
   filesEl.innerHTML = "";
+  fileCountEl.textContent = `${files.length} file${files.length === 1 ? "" : "s"}`;
   if (!files.length) {
-    filesEl.innerHTML = '<li class="empty">No files yet</li>';
+    filesEl.innerHTML = '<div class="empty">No files yet</div>';
     return;
   }
 
+  const tree = buildFileTree(files);
+  const root = document.createElement("ul");
+  root.className = "tree-group";
+  renderTreeLevel(tree, root, "");
+  filesEl.append(root);
+}
+
+function buildFileTree(files) {
+  const root = { directories: new Map(), files: [] };
   for (const file of files) {
+    const parts = file.path.split("/").filter(Boolean);
+    let node = root;
+    for (const directory of parts.slice(0, -1)) {
+      if (!node.directories.has(directory)) {
+        node.directories.set(directory, { directories: new Map(), files: [] });
+      }
+      node = node.directories.get(directory);
+    }
+    node.files.push({ ...file, name: parts.at(-1) || file.path });
+  }
+  return root;
+}
+
+function renderTreeLevel(node, container, parentPath) {
+  const directories = [...node.directories.entries()].sort(([left], [right]) => left.localeCompare(right));
+  for (const [name, childNode] of directories) {
+    const folderPath = parentPath ? `${parentPath}/${name}` : name;
     const item = document.createElement("li");
     const button = document.createElement("button");
+    const children = document.createElement("ul");
+    const expanded = !collapsedFolders.has(folderPath);
+    button.className = "tree-folder";
+    button.type = "button";
+    button.setAttribute("aria-expanded", String(expanded));
+    button.title = folderPath;
+    button.innerHTML = '<span class="tree-chevron" aria-hidden="true">›</span><span class="tree-folder-icon" aria-hidden="true"></span>';
+    const label = document.createElement("span");
+    label.className = "tree-name";
+    label.textContent = name;
+    button.append(label);
+    children.className = "tree-group tree-children";
+    children.hidden = !expanded;
+    button.addEventListener("click", () => {
+      const nextExpanded = button.getAttribute("aria-expanded") !== "true";
+      button.setAttribute("aria-expanded", String(nextExpanded));
+      children.hidden = !nextExpanded;
+      if (nextExpanded) collapsedFolders.delete(folderPath);
+      else collapsedFolders.add(folderPath);
+    });
+    renderTreeLevel(childNode, children, folderPath);
+    item.append(button, children);
+    container.append(item);
+  }
+
+  const sortedFiles = [...node.files].sort((left, right) => left.name.localeCompare(right.name));
+  for (const file of sortedFiles) {
+    const item = document.createElement("li");
+    const button = document.createElement("button");
+    const icon = document.createElement("span");
     const name = document.createElement("span");
     const meta = document.createElement("span");
-    button.className = `file ${file.path === activeFile ? "active" : ""}`;
+    const type = fileType(file.path);
+    button.className = `file-node ${file.path === activeFile ? "active" : ""}`;
     button.type = "button";
     button.dataset.path = file.path;
+    button.title = file.path;
+    icon.className = `file-icon ${type.className}`;
+    icon.textContent = type.label;
     name.className = "file-name";
+    name.textContent = file.name;
     meta.className = "file-meta";
-    name.textContent = file.path;
     meta.textContent = formatBytes(file.size);
-    button.append(name, meta);
+    button.append(icon, name, meta);
     button.addEventListener("click", () => openFile(file));
     item.append(button);
-    filesEl.append(item);
+    container.append(item);
   }
+}
+
+function fileType(path) {
+  const extension = path.includes(".") ? path.split(".").pop().toLowerCase() : "";
+  const types = {
+    py: { className: "py", label: "PY" },
+    js: { className: "js", label: "JS" },
+    jsx: { className: "js", label: "JS" },
+    ts: { className: "ts", label: "TS" },
+    tsx: { className: "ts", label: "TS" },
+    html: { className: "html", label: "<>" },
+    css: { className: "css", label: "#" },
+    json: { className: "json", label: "{}" },
+    md: { className: "md", label: "M" },
+    cpp: { className: "cpp", label: "C+" },
+    cc: { className: "cpp", label: "C+" },
+    h: { className: "cpp", label: "H" },
+    txt: { className: "text", label: "T" },
+  };
+  return types[extension] || { className: "text", label: "·" };
 }
 
 async function openFile(file) {
@@ -549,7 +727,7 @@ function resetEditor() {
 }
 
 function renderActiveFile() {
-  document.querySelectorAll(".file").forEach((button) => {
+  document.querySelectorAll(".file-node").forEach((button) => {
     const isActive = button.dataset.path === activeFile;
     button.classList.toggle("active", isActive);
   });
@@ -565,14 +743,221 @@ function addEvent(event) {
   }
   if (!shouldDisplayEvent(event)) return;
   const item = document.createElement("li");
-  const pre = document.createElement("pre");
-  const title = document.createElement("strong");
+  const head = document.createElement("div");
+  const avatar = document.createElement("span");
+  const title = document.createElement("span");
+  const content = document.createElement("div");
   item.className = `event ${className(event)}`;
+  head.className = "event-head";
+  avatar.className = "event-avatar";
+  avatar.textContent = avatarFor(event);
+  title.className = "event-title";
   title.textContent = titleFor(event);
-  pre.textContent = bodyFor(event);
-  item.append(title, pre);
+  content.className = "event-content";
+  head.append(avatar, title);
+  if (event.type === "route") {
+    content.append(renderRoute(event));
+  } else {
+    content.append(renderMarkdown(bodyFor(event)));
+  }
+  item.append(head, content);
   eventsEl.append(item);
   scrollEventsToBottom();
+}
+
+function avatarFor(event) {
+  if (event.type === "user") return "U";
+  if (event.type === "route") return "↗";
+  if (event.type === "error") return "!";
+  return "AI";
+}
+
+function renderRoute(event) {
+  const card = document.createElement("div");
+  const model = document.createElement("div");
+  const chips = document.createElement("div");
+  const reason = document.createElement("div");
+  card.className = "route-card";
+  model.className = "route-model";
+  model.textContent = `${event.selected_provider || "unavailable"} / ${event.selected_model || "unknown"}`;
+  chips.className = "route-chips";
+  const values = [
+    event.task_type || "general",
+    event.stage || "auto",
+    `score ${event.score ?? 0}`,
+  ];
+  if (event.fallback_count) values.push(`${event.fallback_count} fallback(s)`);
+  for (const value of values) {
+    const chip = document.createElement("span");
+    chip.className = "route-chip";
+    chip.textContent = value;
+    chips.append(chip);
+  }
+  reason.className = "route-reason";
+  reason.textContent = Array.isArray(event.reasons) ? event.reasons.join(" · ") : "Task-aware selection";
+  card.append(model, chips, reason);
+  return card;
+}
+
+function renderMarkdown(value) {
+  const fragment = document.createDocumentFragment();
+  const lines = String(value || "").replace(/\r\n/g, "\n").split("\n");
+  let index = 0;
+  while (index < lines.length) {
+    const line = lines[index];
+    if (!line.trim()) {
+      index += 1;
+      continue;
+    }
+
+    const fence = line.match(/^```\s*([\w+-]*)\s*$/);
+    if (fence) {
+      const codeLines = [];
+      index += 1;
+      while (index < lines.length && !/^```\s*$/.test(lines[index])) {
+        codeLines.push(lines[index]);
+        index += 1;
+      }
+      if (index < lines.length) index += 1;
+      fragment.append(renderCodeBlock(codeLines.join("\n"), fence[1] || "text"));
+      continue;
+    }
+
+    const heading = line.match(/^(#{1,3})\s+(.+)$/);
+    if (heading) {
+      const element = document.createElement(`h${heading[1].length}`);
+      appendInlineMarkdown(element, heading[2]);
+      fragment.append(element);
+      index += 1;
+      continue;
+    }
+
+    if (/^[-*]\s+/.test(line)) {
+      const list = document.createElement("ul");
+      while (index < lines.length && /^[-*]\s+/.test(lines[index])) {
+        const item = document.createElement("li");
+        appendInlineMarkdown(item, lines[index].replace(/^[-*]\s+/, ""));
+        list.append(item);
+        index += 1;
+      }
+      fragment.append(list);
+      continue;
+    }
+
+    if (/^\d+\.\s+/.test(line)) {
+      const list = document.createElement("ol");
+      while (index < lines.length && /^\d+\.\s+/.test(lines[index])) {
+        const item = document.createElement("li");
+        appendInlineMarkdown(item, lines[index].replace(/^\d+\.\s+/, ""));
+        list.append(item);
+        index += 1;
+      }
+      fragment.append(list);
+      continue;
+    }
+
+    if (/^>\s?/.test(line)) {
+      const quote = document.createElement("blockquote");
+      const quoteLines = [];
+      while (index < lines.length && /^>\s?/.test(lines[index])) {
+        quoteLines.push(lines[index].replace(/^>\s?/, ""));
+        index += 1;
+      }
+      appendLinesWithBreaks(quote, quoteLines);
+      fragment.append(quote);
+      continue;
+    }
+
+    const paragraph = document.createElement("p");
+    const paragraphLines = [];
+    while (index < lines.length && lines[index].trim() && !isMarkdownBlockStart(lines[index])) {
+      paragraphLines.push(lines[index]);
+      index += 1;
+    }
+    if (!paragraphLines.length) {
+      paragraphLines.push(line);
+      index += 1;
+    }
+    appendLinesWithBreaks(paragraph, paragraphLines);
+    fragment.append(paragraph);
+  }
+  return fragment;
+}
+
+function isMarkdownBlockStart(line) {
+  return /^```/.test(line) || /^(#{1,3})\s+/.test(line) || /^[-*]\s+/.test(line)
+    || /^\d+\.\s+/.test(line) || /^>\s?/.test(line);
+}
+
+function appendLinesWithBreaks(container, lines) {
+  lines.forEach((line, index) => {
+    if (index) container.append(document.createElement("br"));
+    appendInlineMarkdown(container, line);
+  });
+}
+
+function appendInlineMarkdown(container, text) {
+  const source = String(text || "");
+  const pattern = /(`[^`\n]+`|\*\*[^*\n]+\*\*|\*[^*\n]+\*|\[[^\]\n]+\]\(https?:\/\/[^)\s]+\))/g;
+  let cursor = 0;
+  for (const match of source.matchAll(pattern)) {
+    container.append(document.createTextNode(source.slice(cursor, match.index)));
+    const token = match[0];
+    if (token.startsWith("`")) {
+      const code = document.createElement("code");
+      code.textContent = token.slice(1, -1);
+      container.append(code);
+    } else if (token.startsWith("**")) {
+      const strong = document.createElement("strong");
+      strong.textContent = token.slice(2, -2);
+      container.append(strong);
+    } else if (token.startsWith("*")) {
+      const emphasis = document.createElement("em");
+      emphasis.textContent = token.slice(1, -1);
+      container.append(emphasis);
+    } else {
+      const parts = token.match(/^\[([^\]]+)\]\((https?:\/\/[^)]+)\)$/);
+      if (parts) {
+        const link = document.createElement("a");
+        link.textContent = parts[1];
+        link.href = parts[2];
+        link.target = "_blank";
+        link.rel = "noopener noreferrer";
+        container.append(link);
+      }
+    }
+    cursor = match.index + token.length;
+  }
+  container.append(document.createTextNode(source.slice(cursor)));
+}
+
+function renderCodeBlock(code, language) {
+  const wrapper = document.createElement("div");
+  const head = document.createElement("div");
+  const label = document.createElement("span");
+  const copy = document.createElement("button");
+  const pre = document.createElement("pre");
+  const content = document.createElement("code");
+  wrapper.className = "code-block";
+  head.className = "code-block-head";
+  label.textContent = language;
+  copy.className = "code-copy";
+  copy.type = "button";
+  copy.textContent = "Copy";
+  copy.addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText(code);
+      copy.textContent = "Copied";
+      setTimeout(() => { copy.textContent = "Copy"; }, 1200);
+    } catch (_) {
+      copy.textContent = "Unavailable";
+    }
+  });
+  content.textContent = code;
+  pre.append(content);
+  head.append(label, copy);
+  wrapper.append(head, pre);
+  return wrapper;
 }
 
 function scrollEventsToBottom() {
@@ -618,7 +1003,7 @@ function bodyFor(event) {
     const selected = `${event.selected_provider || "unavailable"} / ${event.selected_model || "unknown"}`;
     const reason = Array.isArray(event.reasons) ? event.reasons.join(", ") : "task score";
     const fallback = event.fallback_count ? ` · ${event.fallback_count} fallback(s)` : "";
-    return `${selected}\n${event.stage || "auto"} · score ${event.score ?? 0}${fallback}\n${reason}`;
+    return `${selected}\n${event.task_type || "general"} · ${event.stage || "auto"} · score ${event.score ?? 0}${fallback}\n${reason}`;
   }
   return event.message || "Unknown error";
 }
@@ -628,6 +1013,7 @@ function className(event) {
   if (event.type === "assistant") return "assistant";
   if (event.type === "user") return "user";
   if (event.type === "route") return "route";
+  if (event.type === "final") return "final";
   return "";
 }
 

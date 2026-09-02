@@ -417,7 +417,7 @@ class DemoHandler(SimpleHTTPRequestHandler):
 
         if parsed.path == "/api/providers":
             labels = {
-                "auto": "Auto (Qwen-first)",
+                "auto": "Auto",
                 "deepseek": "DeepSeek",
                 "openai": "ChatGPT (CloseAI)",
                 "claude": "Claude (CloseAI)",
@@ -433,6 +433,7 @@ class DemoHandler(SimpleHTTPRequestHandler):
                             "protocol": "router" if provider == "auto" else load_llm_config(provider=provider).protocol,
                             "default_model": load_llm_config(provider=provider).model,
                             "context_tokens": load_llm_config(provider=provider).context_tokens,
+                            "routing": "task-aware" if provider == "auto" else "fixed",
                         }
                         for provider in labels
                     ],

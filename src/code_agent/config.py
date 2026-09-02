@@ -67,6 +67,14 @@ PROVIDER_DEFAULTS = {
     },
 }
 
+QWEN_AUTO_MODEL_DEFAULTS = {
+    "qwen-flash": ("QWEN_FLASH_MODEL", "qwen3.7-flash"),
+    "qwen-coder": ("QWEN_CODER_MODEL", "qwen3-coder-next"),
+    "qwen-math": ("QWEN_MATH_MODEL", "qwen-math-plus"),
+    "qwen-plus": ("QWEN_PLUS_MODEL", "qwen3.7-plus"),
+    "qwen-max": ("QWEN_MAX_MODEL", "qwen3.8-max"),
+}
+
 
 @dataclass(frozen=True)
 class LLMConfig:
@@ -105,7 +113,10 @@ def load_llm_config(
 
     # The web dropdown can override the env-selected provider for one request. In that
     # case, do not accidentally reuse a generic DeepSeek value from the local env file.
-    use_common_values = provider == configured_provider or raw_provider == configured_raw_provider
+    use_common_values = (
+        provider != "auto"
+        and (provider == configured_provider or raw_provider == configured_raw_provider)
+    )
 
     defaults = PROVIDER_DEFAULTS[provider]
     # Provider-specific overrides take precedence over the common values. This prevents
@@ -148,6 +159,33 @@ def load_llm_config(
         context_tokens=context_tokens,
         repo_map_chars=repo_map_chars,
     )
+
+
+def load_qwen_auto_models(
+    env_file: str | os.PathLike[str] | None = None,
+) -> dict[str, str]:
+    path = Path(env_file or os.getenv("CODE_AGENT_ENV_FILE") or DEFAULT_ENV_FILE).resolve()
+    values = _read_env_file(path)
+    return {
+        route_name: os.getenv(env_name) or values.get(env_name) or default_model
+        for route_name, (env_name, default_model) in QWEN_AUTO_MODEL_DEFAULTS.items()
+    }
+
+
+def load_auto_route_limits(
+    env_file: str | os.PathLike[str] | None = None,
+) -> tuple[int, int]:
+    path = Path(env_file or os.getenv("CODE_AGENT_ENV_FILE") or DEFAULT_ENV_FILE).resolve()
+    values = _read_env_file(path)
+    legacy_efficient = _read_int("CODE_AGENT_AUTO_QWEN_MAX_SCORE", values, 2, minimum=0)
+    legacy_balanced = _read_int("CODE_AGENT_AUTO_DEEPSEEK_MAX_SCORE", values, 5, minimum=0)
+    efficient = _read_int(
+        "CODE_AGENT_AUTO_EFFICIENT_MAX_SCORE", values, legacy_efficient, minimum=0
+    )
+    balanced = _read_int(
+        "CODE_AGENT_AUTO_BALANCED_MAX_SCORE", values, legacy_balanced, minimum=efficient
+    )
+    return efficient, balanced
 
 
 def _read_int(key: str, values: dict[str, str], default: int, minimum: int) -> int:

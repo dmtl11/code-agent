@@ -4,93 +4,152 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Code Agent Harness</title>
-    <link rel="stylesheet" href="./styles.css?v=20260901-1220" />
+    <link rel="stylesheet" href="./styles.css?v=20260902-1800" />
   </head>
   <body>
     <main class="app">
       <aside class="sidebar">
-        <div class="brand">
-          <h1>Code Agent</h1>
-          <span id="status" class="status">ready</span>
-        </div>
+        <header class="brand">
+          <span class="brand-mark" aria-hidden="true">CA</span>
+          <div>
+            <h1>Code Agent</h1>
+            <span class="brand-caption">Local workspace</span>
+          </div>
+        </header>
 
-        <label for="workspace">Workspace</label>
-        <input id="workspace" value="workspace" />
+        <div class="workspace-block">
+          <label for="workspace">Workspace</label>
+          <div class="workspace-input">
+            <span aria-hidden="true">›</span>
+            <input id="workspace" value="workspace" spellcheck="false" />
+          </div>
+        </div>
 
         <div class="side-head">
-          <h2>Files</h2>
-          <button id="refresh" type="button" title="刷新文件列表">Refresh</button>
+          <div>
+            <h2>Explorer</h2>
+            <span id="file-count" class="side-meta">0 files</span>
+          </div>
+          <button id="refresh" class="icon-button" type="button" title="刷新文件列表" aria-label="刷新文件列表">↻</button>
         </div>
-        <ol id="files" class="files">
-          <li class="empty">No files yet</li>
-        </ol>
+        <div id="files" class="files" role="tree">
+          <div class="empty">No files yet</div>
+        </div>
+
+        <footer class="sidebar-status">
+          <span class="status-dot" aria-hidden="true"></span>
+          <span id="status" class="status">ready</span>
+        </footer>
       </aside>
 
       <section class="editor">
-        <div class="editor-head">
-          <div>
-            <p class="eyebrow">Editor</p>
-            <h2 id="file-title">No file selected</h2>
+        <header class="editor-head">
+          <div class="file-heading">
+            <span class="editor-tab-dot" aria-hidden="true"></span>
+            <div>
+              <p class="eyebrow">Editor</p>
+              <h2 id="file-title">No file selected</h2>
+            </div>
           </div>
           <div class="editor-actions">
             <span id="language" class="pill">Text</span>
             <button id="save-file" type="button" disabled>Save</button>
-            <button id="run-file" type="button" disabled>Run File</button>
+            <button id="run-file" class="primary-action" type="button" disabled>Run file</button>
           </div>
-        </div>
-        <textarea id="code-editor" class="code-editor" spellcheck="false" disabled>// Choose a file from the left to edit it.</textarea>
-        <pre id="terminal" class="terminal">No file command has run yet.</pre>
+        </header>
+        <textarea id="code-editor" class="code-editor" spellcheck="false" disabled>// Choose a file from the explorer to edit it.</textarea>
+        <section class="terminal-panel">
+          <div class="terminal-head">
+            <span>Terminal</span>
+            <span class="terminal-shell">local</span>
+          </div>
+          <pre id="terminal" class="terminal">No file command has run yet.</pre>
+        </section>
       </section>
 
       <aside class="agent-panel">
-        <div class="agent-head">
-          <div>
-            <p class="eyebrow">Agent</p>
-            <h2>Chat</h2>
+        <header class="agent-head">
+          <div class="agent-title">
+            <span class="agent-mark" aria-hidden="true">◆</span>
+            <div>
+              <p class="eyebrow">Agent</p>
+              <h2 id="agent-view-title">Workspace chat</h2>
+            </div>
           </div>
+          <button id="clear" class="icon-button" type="button" title="清空当前对话" aria-label="清空当前对话">×</button>
+        </header>
+
+        <div class="agent-controls">
           <div id="mode-switch" class="mode-switch" role="group" aria-label="Agent mode">
             <button type="button" class="active" data-mode="code" title="编辑并验证代码">Code</button>
             <button type="button" data-mode="ask" title="只读问答">Ask</button>
             <button type="button" data-mode="architect" title="只生成实施计划">Plan</button>
             <button type="button" data-mode="context" title="查看当前仓库上下文">Context</button>
           </div>
-          <button id="clear" type="button" title="清空对话">Clear</button>
-        </div>
-        <div class="agent-subhead">
           <div id="context-status" class="context-status">Context ready</div>
-          <div class="panel-tabs" role="tablist" aria-label="Agent panels">
-            <button id="chat-tab" class="active" type="button" role="tab">Chat</button>
-            <button id="review-tab" type="button" role="tab">Review <span id="review-count"></span></button>
-            <button id="monitor-tab" type="button" role="tab">Monitor</button>
-          </div>
         </div>
+
+        <nav class="panel-tabs" role="tablist" aria-label="Agent panels">
+          <button id="chat-tab" class="active" type="button" role="tab" aria-selected="true">Chat</button>
+          <button id="review-tab" type="button" role="tab" aria-selected="false">Review <span id="review-count"></span></button>
+          <button id="monitor-tab" type="button" role="tab" aria-selected="false">Monitor</button>
+        </nav>
+
         <div class="agent-body">
-          <div id="chat-view" class="chat-view">
+          <section id="chat-view" class="chat-view">
             <ol id="events" class="events">
-              <li class="empty">Ask the agent to change code in this workspace.</li>
+              <li class="empty chat-empty">
+                <strong>Start a coding task</strong>
+                <span>Ask the agent to inspect, edit, and verify this workspace.</span>
+              </li>
             </ol>
-          </div>
+            <section id="composer" class="composer">
+              <textarea id="task" placeholder="Describe a coding task for the agent.">Create a hello world Python script and run it.</textarea>
+              <div class="composer-footer">
+                <div class="model-control">
+                  <label for="provider">Model</label>
+                  <select id="provider" title="选择本次请求使用的大模型">
+                    <option value="auto">Auto</option>
+                    <option value="deepseek">DeepSeek</option>
+                    <option value="openai">ChatGPT (CloseAI)</option>
+                    <option value="claude">Claude (CloseAI)</option>
+                    <option value="qwen">Qwen</option>
+                  </select>
+                  <span id="provider-hint">Task-aware model selection</span>
+                </div>
+                <button id="run" class="run" type="button" title="运行 Agent">Run</button>
+              </div>
+            </section>
+          </section>
+
           <section id="review-view" class="review-view" hidden>
-            <div class="review-toolbar">
-              <span id="review-summary">No changes to review.</span>
+            <div class="view-toolbar review-toolbar">
               <div>
-                <button id="review-refresh" type="button" title="刷新审查变更">Refresh</button>
-                <button id="review-merge" type="button" disabled title="合并选中的两次或多次修改">Merge selected</button>
-                <button id="review-rollback" type="button" disabled title="回滚选中的修改">Rollback selected</button>
+                <strong>Changes</strong>
+                <span id="review-summary">No changes to review.</span>
+              </div>
+              <div class="toolbar-actions">
+                <button id="review-refresh" class="icon-button" type="button" title="刷新审查变更" aria-label="刷新审查变更">↻</button>
+                <button id="review-rollback" type="button" disabled title="回滚选中的修改">Rollback</button>
+                <button id="review-merge" class="primary-action" type="button" disabled title="合并选中的两次或多次修改">Accept selected</button>
               </div>
             </div>
             <ol id="reviews" class="reviews">
               <li class="empty">Run the agent to create review changes.</li>
             </ol>
           </section>
+
           <section id="monitor-view" class="monitor-view" hidden>
-            <div class="monitor-toolbar">
-              <span id="monitor-scope">Workspace monitor</span>
-              <button id="monitor-refresh" type="button" title="刷新监控数据">Refresh</button>
+            <div class="view-toolbar monitor-toolbar">
+              <div>
+                <strong>Observability</strong>
+                <span id="monitor-scope">Workspace monitor</span>
+              </div>
+              <button id="monitor-refresh" class="icon-button" type="button" title="刷新监控数据" aria-label="刷新监控数据">↻</button>
             </div>
             <div id="monitor-kpis" class="monitor-kpis"></div>
             <section class="monitor-section">
-              <h3>By model</h3>
+              <h3>Models</h3>
               <div id="monitor-providers" class="monitor-list"></div>
             </section>
             <section class="monitor-section">
@@ -98,7 +157,7 @@
               <div id="monitor-routes" class="monitor-list"></div>
             </section>
             <section class="monitor-section">
-              <h3>By tool</h3>
+              <h3>Tools</h3>
               <div id="monitor-tools" class="monitor-list"></div>
             </section>
             <section class="monitor-section">
@@ -106,26 +165,9 @@
               <div id="monitor-errors" class="monitor-list"></div>
             </section>
           </section>
-          <section class="composer">
-            <div class="composer-main">
-              <div class="composer-toolbar">
-                <label for="provider">Model</label>
-                <select id="provider" title="选择本次请求使用的大模型">
-                  <option value="auto">Auto (Qwen-first)</option>
-                  <option value="deepseek">DeepSeek</option>
-                  <option value="openai">ChatGPT (CloseAI)</option>
-                  <option value="claude">Claude (CloseAI)</option>
-                  <option value="qwen">Qwen</option>
-                </select>
-                <span id="provider-hint">Smart cascade · auto-cascade</span>
-              </div>
-              <textarea id="task">Create a hello world Python script and run it.</textarea>
-            </div>
-            <button id="run" class="run" type="button">Run</button>
-          </section>
         </div>
       </aside>
     </main>
-    <script src="./app.js?v=20260901-2330"></script>
+    <script src="./app.js?v=20260902-1800"></script>
   </body>
 </html>

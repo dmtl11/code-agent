@@ -2,45 +2,59 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
-from .config import load_llm_config
+from .config import load_auto_route_limits, load_llm_config, load_qwen_auto_models
 from .model import ChatModel, ModelError
 
 
-ROUTABLE_PROVIDERS = ("qwen", "deepseek", "openai", "claude")
-DEFAULT_CASCADES = {
+MODEL_CASCADES = {
+    "qwen-flash": (
+        "qwen-flash", "qwen-plus", "qwen-max", "qwen", "deepseek", "openai", "claude"
+    ),
+    "qwen-coder": (
+        "qwen-coder", "qwen-max", "qwen", "deepseek", "openai", "claude", "qwen-plus"
+    ),
+    "qwen-math": (
+        "qwen-math", "qwen-plus", "qwen-max", "qwen", "deepseek", "openai", "claude"
+    ),
+    "qwen-plus": (
+        "qwen-plus", "qwen-max", "qwen", "deepseek", "openai", "claude", "qwen-flash"
+    ),
+    "qwen-max": (
+        "qwen-max", "qwen-coder", "qwen", "deepseek", "openai", "claude", "qwen-plus"
+    ),
     "qwen": ("qwen", "deepseek", "openai", "claude"),
-    "deepseek": ("deepseek", "openai", "claude", "qwen"),
-    "openai": ("openai", "claude", "deepseek", "qwen"),
-    "claude": ("claude", "openai", "deepseek", "qwen"),
+    "deepseek": (
+        "deepseek", "qwen-max", "openai", "claude", "qwen-coder", "qwen-plus", "qwen"
+    ),
+    "openai": ("openai", "claude", "qwen-max", "deepseek", "qwen-coder", "qwen"),
+    "claude": ("claude", "openai", "qwen-max", "deepseek", "qwen-coder", "qwen"),
 }
 
 COMPLEX_TERMS = (
-    "architecture",
-    "architect",
-    "refactor",
-    "migration",
-    "concurrency",
-    "security",
-    "full stack",
-    "multi-file",
-    "debug",
-    "架构",
-    "重构",
-    "迁移",
-    "并发",
-    "安全",
-    "前后端",
-    "多文件",
-    "排查",
+    "architecture", "architect", "refactor", "migration", "concurrency", "security",
+    "full stack", "multi-file", "debug", "架构", "重构", "迁移", "并发", "安全",
+    "前后端", "多文件", "排查",
+)
+CODE_TERMS = (
+    "code", "coding", "function", "class", "bug", "test", "api", "python", "javascript",
+    "typescript", "react", "vue", "cpp", "c++", ".py", ".js", ".ts", ".tsx", ".cpp",
+    "代码", "函数", "类", "接口", "修复", "报错", "测试", "文件", "项目", "编译",
+    "运行", "前端", "后端", "仓库", "实现",
+)
+MATH_TERMS = (
+    "equation", "integral", "derivative", "theorem", "probability", "matrix", "geometry",
+    "calculate", "prove", "latex", "方程", "积分", "导数", "定理", "概率", "矩阵", "几何",
+    "计算", "证明", "数学", "数列", "极限",
 )
 
 
 @dataclass(frozen=True)
 class RouteDecision:
     preferred: str
+    task_type: str
     stage: str
     score: int
     reasons: tuple[str, ...]
@@ -48,7 +62,7 @@ class RouteDecision:
 
 
 class AutoRoutingModel:
-    """Route each model turn while preserving the agent's common message format."""
+    """Classify the task, select a concrete model, then cascade on failures."""
 
     provider = "auto"
     model = "auto-cascade"
@@ -59,20 +73,35 @@ class AutoRoutingModel:
         env_file: str | os.PathLike[str] | None = None,
     ) -> None:
         if models is None:
-            models = {}
-            for provider in ROUTABLE_PROVIDERS:
-                config = load_llm_config(env_file=env_file, provider=provider)
-                if config.api_key:
-                    models[provider] = ChatModel(config)
-        self.models = {name: value for name, value in models.items() if name in ROUTABLE_PROVIDERS}
-        self.failure_counts = {provider: 0 for provider in ROUTABLE_PROVIDERS}
-        self.retry_after = {provider: 0 for provider in ROUTABLE_PROVIDERS}
+            models = self._load_models(env_file)
+        self.models = {
+            name: value for name, value in models.items() if name in MODEL_CASCADES
+        }
+        self.target_providers = {
+            name: "qwen" if name.startswith("qwen") else name for name in self.models
+        }
+        self.failure_counts = {target: 0 for target in self.models}
+        self.retry_after = {target: 0 for target in self.models}
+        self.efficient_max, self.balanced_max = load_auto_route_limits(env_file)
         self.call_count = 0
         self.last_usage: dict[str, int] = {}
         self.last_usage_source = "unavailable"
         self.last_provider = "auto"
         self.last_model = self.model
         self.last_route: dict[str, Any] = {}
+
+    @staticmethod
+    def _load_models(env_file: str | os.PathLike[str] | None) -> dict[str, Any]:
+        models: dict[str, Any] = {}
+        qwen_config = load_llm_config(env_file=env_file, provider="qwen")
+        if qwen_config.api_key:
+            for target, model_name in load_qwen_auto_models(env_file).items():
+                models[target] = ChatModel(replace(qwen_config, model=model_name))
+        for provider in ("deepseek", "openai", "claude"):
+            config = load_llm_config(env_file=env_file, provider=provider)
+            if config.api_key:
+                models[provider] = ChatModel(config)
+        return models
 
     def route(self, messages: list[dict[str, Any]]) -> RouteDecision:
         score = 0
@@ -82,10 +111,7 @@ class AutoRoutingModel:
         context_chars = sum(len(str(message.get("content") or "")) for message in messages)
         tool_failures = self._recent_tool_failures(messages)
         tool_messages = sum(message.get("role") == "tool" for message in messages)
-        architect_mode = any(
-            message.get("role") == "system" and "Mode: ARCHITECT" in str(message.get("content") or "")
-            for message in messages[:4]
-        )
+        task_type = self._task_type(lowered, self._mode(messages))
 
         if len(user_text) > 600:
             score += 1
@@ -97,9 +123,9 @@ class AutoRoutingModel:
         if matched:
             score += min(3, 1 + len(matched) // 2)
             reasons.append("complex task signals")
-        if architect_mode:
+        if task_type == "architecture":
             score += 3
-            reasons.append("architect mode")
+            reasons.append("architecture task")
         if tool_failures:
             score += min(3, tool_failures)
             reasons.append(f"{tool_failures} recent tool failure(s)")
@@ -113,27 +139,26 @@ class AutoRoutingModel:
             score += 1
             reasons.append("medium context")
 
-        qwen_max = self._env_int("CODE_AGENT_AUTO_QWEN_MAX_SCORE", 2)
-        deepseek_max = self._env_int("CODE_AGENT_AUTO_DEEPSEEK_MAX_SCORE", 5)
-        if score <= qwen_max:
-            preferred, stage = "qwen", "efficient"
-        elif score <= deepseek_max:
-            preferred, stage = "deepseek", "balanced"
-        elif architect_mode or context_chars // 4 > 16000:
-            preferred, stage = "claude", "capable"
+        if score <= self.efficient_max:
+            stage = "efficient"
+        elif score <= self.balanced_max:
+            stage = "balanced"
         else:
-            preferred, stage = "openai", "capable"
+            stage = "capable"
+        preferred = self._preferred_target(task_type, stage)
 
-        configured = [provider for provider in DEFAULT_CASCADES[preferred] if provider in self.models]
+        configured = [target for target in MODEL_CASCADES[preferred] if target in self.models]
         configured.sort(
-            key=lambda provider: (
-                self.retry_after.get(provider, 0) > self.call_count,
-                self.failure_counts.get(provider, 0),
+            key=lambda target: (
+                self.retry_after.get(target, 0) > self.call_count,
+                self.failure_counts.get(target, 0),
             )
         )
         if not reasons:
-            reasons.append("short routine coding turn")
-        return RouteDecision(preferred, stage, score, tuple(reasons), tuple(configured))
+            reasons.append(f"{task_type} task detected from user input")
+        return RouteDecision(
+            preferred, task_type, stage, score, tuple(reasons), tuple(configured)
+        )
 
     def complete(
         self,
@@ -144,51 +169,91 @@ class AutoRoutingModel:
         decision = self.route(messages)
         attempts: list[dict[str, str]] = []
         if not decision.candidates:
-            self.last_route = self._route_payload(decision, "", "", attempts)
+            self.last_route = self._route_payload(decision, "", "", "", attempts)
             raise ModelError(
                 "Auto router found no configured model. Fill QWEN_API_KEY, DEEPSEEK_API_KEY, "
                 "or CLOSEAI_API_KEY in config/llm.env."
             )
 
-        for provider in decision.candidates:
-            model = self.models[provider]
+        for target in decision.candidates:
+            model = self.models[target]
+            provider = self.target_providers[target]
+            model_name = str(getattr(model, "model", target))
             try:
                 response = model.complete(messages, tools)
             except Exception as exc:
-                self.failure_counts[provider] += 1
-                self.retry_after[provider] = self.call_count + 2
+                self.failure_counts[target] += 1
+                self.retry_after[target] = self.call_count + 2
                 attempts.append(
                     {
+                        "target": target,
                         "provider": provider,
+                        "model": model_name,
                         "error": f"{type(exc).__name__}: {exc}"[:300],
                     }
                 )
                 continue
 
-            self.failure_counts[provider] = max(0, self.failure_counts[provider] - 1)
-            self.retry_after[provider] = 0
+            self.failure_counts[target] = max(0, self.failure_counts[target] - 1)
+            self.retry_after[target] = 0
             self.last_usage = dict(getattr(model, "last_usage", {}) or {})
             self.last_usage_source = getattr(model, "last_usage_source", "unavailable")
             self.last_provider = provider
-            self.last_model = str(getattr(model, "model", provider))
+            self.last_model = model_name
             self.last_route = self._route_payload(
-                decision,
-                self.last_provider,
-                self.last_model,
-                attempts,
+                decision, target, self.last_provider, self.last_model, attempts
             )
             return response
 
-        self.last_provider = attempts[-1]["provider"] if attempts else "auto"
-        self.last_model = str(getattr(self.models.get(self.last_provider), "model", self.model))
+        last_target = attempts[-1]["target"] if attempts else ""
+        self.last_provider = self.target_providers.get(last_target, "auto")
+        self.last_model = attempts[-1]["model"] if attempts else self.model
         self.last_route = self._route_payload(
-            decision,
-            self.last_provider,
-            self.last_model,
-            attempts,
+            decision, last_target, self.last_provider, self.last_model, attempts
         )
-        detail = "; ".join(f"{item['provider']}: {item['error']}" for item in attempts)
-        raise ModelError(f"Auto router exhausted all configured providers. {detail}")
+        detail = "; ".join(f"{item['model']}: {item['error']}" for item in attempts)
+        raise ModelError(f"Auto router exhausted all configured models. {detail}")
+
+    @staticmethod
+    def _mode(messages: list[dict[str, Any]]) -> str:
+        system_text = "\n".join(
+            str(message.get("content") or "")
+            for message in messages[:4]
+            if message.get("role") == "system"
+        )
+        if "Mode: ARCHITECT" in system_text:
+            return "architect"
+        if "Mode: ASK" in system_text:
+            return "ask"
+        return "code"
+
+    @staticmethod
+    def _task_type(lowered: str, mode: str) -> str:
+        if mode == "architect" or any(
+            term in lowered for term in ("architecture", "architect", "架构")
+        ):
+            return "architecture"
+        math_signal = any(term in lowered for term in MATH_TERMS)
+        code_signal = any(term in lowered for term in CODE_TERMS)
+        if math_signal and not code_signal:
+            return "math"
+        if code_signal:
+            return "code"
+        return "general"
+
+    @staticmethod
+    def _preferred_target(task_type: str, stage: str) -> str:
+        if task_type == "architecture":
+            return "qwen-max"
+        if task_type == "math":
+            return "qwen-math"
+        if task_type == "code":
+            return "qwen-max" if stage == "capable" else "qwen-coder"
+        if stage == "efficient":
+            return "qwen-flash"
+        if stage == "balanced":
+            return "qwen-plus"
+        return "qwen-max"
 
     @staticmethod
     def _last_user_text(messages: list[dict[str, Any]]) -> str:
@@ -212,29 +277,33 @@ class AutoRoutingModel:
                 failures += 1
         return failures
 
-    @staticmethod
-    def _env_int(name: str, default: int) -> int:
-        try:
-            return int(os.getenv(name, str(default)))
-        except ValueError:
-            return default
-
-    @staticmethod
     def _route_payload(
+        self,
         decision: RouteDecision,
+        selected_target: str,
         selected_provider: str,
         selected_model: str,
         attempts: list[dict[str, str]],
     ) -> dict[str, Any]:
+        preferred_model = str(
+            getattr(self.models.get(decision.preferred), "model", decision.preferred)
+        )
         return {
             "requested_provider": "auto",
-            "preferred_provider": decision.preferred,
+            "task_type": decision.task_type,
+            "preferred_target": decision.preferred,
+            "preferred_provider": self.target_providers.get(decision.preferred, "qwen"),
+            "preferred_model": preferred_model,
+            "selected_target": selected_target,
             "selected_provider": selected_provider,
             "selected_model": selected_model,
             "stage": decision.stage,
             "score": decision.score,
             "reasons": list(decision.reasons),
-            "candidates": list(decision.candidates),
+            "candidates": [
+                str(getattr(self.models[target], "model", target))
+                for target in decision.candidates
+            ],
             "attempts": list(attempts),
             "fallback_count": len(attempts),
         }
