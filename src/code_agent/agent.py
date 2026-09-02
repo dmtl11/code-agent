@@ -29,7 +29,13 @@ MODE_PROMPTS = {
 4. run lint_file and a relevant verification command after editing, then react to failures,
 5. call finish with a concise summary and verification result.
 On Windows, run_command uses cmd.exe. Do not use Bash-only syntax such as sleep, pkill, or a bare '&'.
-Commands must finish by themselves; do not launch persistent background services with start /b or Start-Process.
+run_command is for finite commands only. For persistent servers, use start_service with an executable/arguments
+array and workspace-relative cwd; never use start /b, Start-Process, shell '&', or detach the service yourself.
+Before starting, call service_status to reuse existing services. Bind development servers to 127.0.0.1.
+Supply the actual port and a valid health_path to start_service. A running process alone is not proof the app works.
+Use service_logs to diagnose startup errors, fix the cause, and retry. Report success only after readiness checks;
+give the verified URL and service ID. Use stop_service when asked to stop or restart an owned service.
+Services survive conversation turns and model switches while this host runs; they stop when the host exits.
 Do not ask the user to do work that you can do with tools.""",
     "ask": """Mode: ASK. Answer questions about the repository. You may inspect files, but you must not
 edit files or execute commands. Cite file paths and line numbers from read_file when useful, then call finish.""",

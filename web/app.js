@@ -13,6 +13,9 @@ const languageEl = document.querySelector("#language");
 const saveFileButton = document.querySelector("#save-file");
 const runFileButton = document.querySelector("#run-file");
 const terminalEl = document.querySelector("#terminal");
+const terminalResizeEl = document.querySelector("#terminal-resize");
+const editorPanelEl = document.querySelector(".editor");
+const terminalPanelEl = document.querySelector("#terminal-panel");
 const modeButtons = document.querySelectorAll("#mode-switch [data-mode]");
 const contextStatusEl = document.querySelector("#context-status");
 const agentViewTitleEl = document.querySelector("#agent-view-title");
@@ -45,6 +48,93 @@ let providerCatalog = new Map();
 let sessionId = localStorage.getItem("code-agent-session-id") || "";
 let reviewChanges = [];
 const collapsedFolders = new Set();
+
+initializeTerminalResize();
+
+function initializeTerminalResize() {
+  const storageKey = "code-agent-terminal-ratio";
+  const defaultRatio = 0.3;
+  let preferredRatio = defaultRatio;
+  let drag = null;
+  try {
+    const saved = Number(localStorage.getItem(storageKey));
+    if (Number.isFinite(saved) && saved > 0 && saved < 1) preferredRatio = saved;
+  } catch { /* Resizing also works when browser storage is unavailable. */ }
+
+  function bounds() {
+    const available = Math.max(1, editorPanelEl.clientHeight
+      - editorPanelEl.querySelector(".editor-head").offsetHeight - terminalResizeEl.offsetHeight);
+    return {
+      available,
+      minimum: Math.min(80, available * 0.4) / available,
+      maximum: 1 - Math.min(120, available * 0.4) / available,
+    };
+  }
+
+  function render() {
+    const { minimum, maximum } = bounds();
+    const ratio = Math.max(minimum, Math.min(maximum, preferredRatio));
+    editorPanelEl.style.setProperty("--editor-share", `${1 - ratio}fr`);
+    editorPanelEl.style.setProperty("--terminal-share", `${ratio}fr`);
+    terminalResizeEl.setAttribute("aria-valuemin", String(Math.round(minimum * 100)));
+    terminalResizeEl.setAttribute("aria-valuemax", String(Math.round(maximum * 100)));
+    terminalResizeEl.setAttribute("aria-valuenow", String(Math.round(ratio * 100)));
+    terminalResizeEl.setAttribute("aria-valuetext", `${Math.round(ratio * 100)}% terminal`);
+  }
+
+  function setRatio(ratio) {
+    const { minimum, maximum } = bounds();
+    preferredRatio = Math.max(minimum, Math.min(maximum, ratio));
+    render();
+  }
+
+  function save() {
+    try { localStorage.setItem(storageKey, String(preferredRatio)); } catch { /* Optional preference. */ }
+  }
+
+  function endDrag() {
+    if (!drag) return;
+    const pointerId = drag.pointerId;
+    drag = null;
+    document.body.classList.remove("resizing-terminal");
+    if (terminalResizeEl.hasPointerCapture(pointerId)) terminalResizeEl.releasePointerCapture(pointerId);
+    save();
+  }
+
+  terminalResizeEl.addEventListener("pointerdown", (event) => {
+    if (event.button !== 0 || !event.isPrimary) return;
+    event.preventDefault();
+    drag = { pointerId: event.pointerId, y: event.clientY, height: terminalPanelEl.getBoundingClientRect().height };
+    terminalResizeEl.setPointerCapture(event.pointerId);
+    terminalResizeEl.focus({ preventScroll: true });
+    document.body.classList.add("resizing-terminal");
+  });
+  terminalResizeEl.addEventListener("pointermove", (event) => {
+    if (!drag || event.pointerId !== drag.pointerId) return;
+    setRatio((drag.height + drag.y - event.clientY) / bounds().available);
+  });
+  for (const type of ["pointerup", "pointercancel", "lostpointercapture"]) terminalResizeEl.addEventListener(type, endDrag);
+  window.addEventListener("blur", endDrag);
+  terminalResizeEl.addEventListener("dblclick", () => {
+    preferredRatio = defaultRatio;
+    render();
+    save();
+  });
+  terminalResizeEl.addEventListener("keydown", (event) => {
+    const { minimum, maximum } = bounds();
+    const step = event.shiftKey ? 0.1 : 0.03;
+    const current = Math.max(minimum, Math.min(maximum, preferredRatio));
+    if (event.key === "ArrowUp") setRatio(current + step);
+    else if (event.key === "ArrowDown") setRatio(current - step);
+    else if (event.key === "Home") setRatio(minimum);
+    else if (event.key === "End") setRatio(maximum);
+    else return;
+    event.preventDefault();
+    save();
+  });
+  new ResizeObserver(render).observe(editorPanelEl);
+  render();
+}
 
 const EMPTY_CHAT = `
   <li class="empty chat-empty">

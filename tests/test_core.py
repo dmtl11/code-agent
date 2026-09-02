@@ -165,7 +165,8 @@ class CoreFeatureTests(unittest.TestCase):
         tools = LocalTools(self.workspace)
         background = tools.call("run_command", {"command": "start /b node server.js", "timeout": 5})
         self.assertFalse(background.ok)
-        self.assertIn("Background services are not supported", background.output)
+        self.assertIn("Background shell syntax is not supported", background.output)
+        self.assertIn("start_service", background.output)
 
         started = perf_counter()
         timed_out = tools.call(

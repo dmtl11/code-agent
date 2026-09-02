@@ -630,7 +630,13 @@ def main() -> None:
 
     server = ThreadingHTTPServer((args.host, args.port), DemoHandler)
     print(f"Code Agent Harness demo: http://{args.host}:{args.port}")
-    server.serve_forever()
+    try:
+        server.serve_forever()
+    finally:
+        from .services import shutdown_services
+
+        shutdown_services()
+        server.server_close()
 
 
 if __name__ == "__main__":

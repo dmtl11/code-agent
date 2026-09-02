@@ -58,7 +58,11 @@
           </div>
         </header>
         <textarea id="code-editor" class="code-editor" spellcheck="false" disabled>// Choose a file from the explorer to edit it.</textarea>
-        <section class="terminal-panel">
+        <div id="terminal-resize" class="terminal-resize" role="separator" tabindex="0"
+          aria-label="调整终端高度" aria-orientation="horizontal" aria-controls="terminal-panel"
+          aria-valuemin="10" aria-valuemax="90" aria-valuenow="30"
+          title="拖动调整终端高度，双击恢复默认"></div>
+        <section id="terminal-panel" class="terminal-panel">
           <div class="terminal-head">
             <span>Terminal</span>
             <span class="terminal-shell">local</span>

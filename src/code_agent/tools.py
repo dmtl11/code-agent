@@ -17,6 +17,7 @@ from typing import Any
 from .code_registry import CodeRegistry, IGNORED_PARTS
 from .patching import PatchEngine
 from .repo_map import RepoMap
+from .services import get_service_manager
 
 
 class ToolError(RuntimeError):
@@ -48,7 +49,7 @@ class LocalTools:
 
     @property
     def allowed_tools(self) -> set[str]:
-        read_only = {"repo_map", "list_files", "read_file", "search_files", "finish"}
+        read_only = {"repo_map", "list_files", "read_file", "search_files", "service_status", "service_logs", "finish"}
         if self.mode in {"ask", "architect"}:
             return read_only
         return read_only | {
@@ -58,6 +59,8 @@ class LocalTools:
             "apply_patch",
             "rollback_patch",
             "run_command",
+            "start_service",
+            "stop_service",
         }
 
     def schema(self) -> list[dict[str, Any]]:
@@ -207,7 +210,7 @@ class LocalTools:
                 "type": "function",
                 "function": {
                     "name": "run_command",
-                    "description": "Run a shell command in the workspace and return stdout/stderr.",
+                    "description": "Run a finite shell command and return stdout/stderr. For persistent servers use start_service.",
                     "parameters": {
                         "type": "object",
                         "required": ["command"],
@@ -215,6 +218,67 @@ class LocalTools:
                             "command": {"type": "string"},
                             "timeout": {"type": "integer", "minimum": 1, "maximum": 60},
                         },
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "start_service",
+                    "description": (
+                        "Start a managed, persistent local service without blocking the conversation. "
+                        "Use executable/argument arrays, not shell background syntax. Bind dev servers to 127.0.0.1. "
+                        "Set port and health_path to verify HTTP readiness. Returns a service ID for status/logs/stop. "
+                        "Services survive chat turns, but stop when the Code Agent host exits."
+                    ),
+                    "parameters": {
+                        "type": "object", "required": ["command"],
+                        "properties": {
+                            "command": {
+                                "type": "array", "minItems": 1, "items": {"type": "string"},
+                                "description": "Example: [\"python\", \"app.py\", \"--port\", \"8000\"]. No shell operators.",
+                            },
+                            "cwd": {"type": "string", "description": "Workspace-relative working directory, default '.'"},
+                            "name": {"type": "string", "maxLength": 80},
+                            "port": {"type": "integer", "minimum": 1, "maximum": 65535},
+                            "health_path": {"type": "string", "description": "Local HTTP path such as /health; requires port. No redirects."},
+                            "startup_timeout": {"type": "integer", "minimum": 1, "maximum": 30},
+                        },
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "service_status",
+                    "description": "List this workspace's managed services, or inspect one service's process and readiness.",
+                    "parameters": {
+                        "type": "object", "properties": {"service_id": {"type": "string"}},
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "service_logs",
+                    "description": "Read a bounded tail of a managed service's combined stdout/stderr without waiting for exit.",
+                    "parameters": {
+                        "type": "object", "required": ["service_id"],
+                        "properties": {
+                            "service_id": {"type": "string"},
+                            "lines": {"type": "integer", "minimum": 1, "maximum": 300},
+                        },
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "stop_service",
+                    "description": "Stop a service and its child processes using its registered service ID, never an arbitrary PID.",
+                    "parameters": {
+                        "type": "object", "required": ["service_id"],
+                        "properties": {"service_id": {"type": "string"}},
                     },
                 },
             },
@@ -274,6 +338,26 @@ class LocalTools:
                 return self._rollback_patch(arguments["transaction_id"])
             if name == "run_command":
                 return self._run_command(arguments["command"], int(arguments.get("timeout", 20)))
+            if name == "start_service":
+                command = arguments["command"]
+                if not isinstance(command, list) or not command or not all(isinstance(arg, str) for arg in command):
+                    raise ToolError("command must be an executable/arguments array, not a shell string")
+                self._guard_command(subprocess.list2cmdline(command))
+                result = get_service_manager(self.workspace).start(
+                    command, arguments.get("cwd", "."), arguments.get("name", ""),
+                    arguments.get("port"), arguments.get("health_path"), arguments.get("startup_timeout", 10),
+                )
+                ok = result["state"] in {"starting", "running"} and (result["ready"] or result["port"] is None)
+                return ToolResult(ok, json.dumps(result, ensure_ascii=False))
+            if name == "service_status":
+                result = get_service_manager(self.workspace).status(arguments.get("service_id"))
+                return ToolResult(True, json.dumps(result, ensure_ascii=False))
+            if name == "service_logs":
+                result = get_service_manager(self.workspace).logs(arguments["service_id"], arguments.get("lines", 80))
+                return ToolResult(True, json.dumps(result, ensure_ascii=False))
+            if name == "stop_service":
+                result = get_service_manager(self.workspace).stop(arguments["service_id"])
+                return ToolResult(True, json.dumps(result, ensure_ascii=False))
             if name == "finish":
                 return ToolResult(True, str(arguments["summary"]))
             raise ToolError(f"Unknown tool: {name}")
@@ -553,8 +637,8 @@ class LocalTools:
         background = re.search(r"(?<!&)&(?!&)", command) or "start /b" in normalized or "start-process" in normalized
         if background:
             raise ToolError(
-                "Background services are not supported by run_command because they can keep the tool output open. "
-                "Use a finite validation command that starts, probes, and stops the service in one foreground process."
+                "Background shell syntax is not supported. Use start_service with an executable/arguments array "
+                "for persistent services, then service_status, service_logs, and stop_service to manage them."
             )
         try:
             parts = shlex.split(command, posix=os.name != "nt")
