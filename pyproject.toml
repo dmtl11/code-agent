@@ -7,6 +7,13 @@ requires-python = ">=3.10"
 [project.scripts]
 code-agent = "code_agent.cli:main"
 code-agent-eval = "code_agent.eval:main"
+code-agent-router = "code_agent.router_server:main"
+
+[project.optional-dependencies]
+semantic-router = [
+    "torch>=2.2",
+    "transformers>=4.37",
+]
 
 [build-system]
 requires = ["setuptools>=68"]

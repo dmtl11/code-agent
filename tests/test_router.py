@@ -11,9 +11,14 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from code_agent.config import load_llm_config, load_qwen_auto_models
+from code_agent.config import (
+    load_llm_config,
+    load_qwen_auto_models,
+    load_semantic_router_config,
+)
 from code_agent.model import ModelError
 from code_agent.model_router import AutoRoutingModel
+from code_agent.semantic_router import ArchRouterClient
 from code_agent.session_store import SessionStore
 
 
@@ -30,6 +35,19 @@ class FakeModel:
         if self.error:
             raise ModelError(self.error)
         return {"role": "assistant", "content": self.model, "tool_calls": []}
+
+
+class FakeSemanticRouter:
+    def __init__(self, route: str = "", error: str = "") -> None:
+        self.route = route
+        self.error = error
+        self.calls = 0
+
+    def classify(self, messages):
+        self.calls += 1
+        if self.error:
+            raise RuntimeError(self.error)
+        return self.route
 
 
 class AutoRouterTests(unittest.TestCase):
@@ -124,6 +142,59 @@ class AutoRouterTests(unittest.TestCase):
                 "qwen-plus": "plus-test",
                 "qwen-max": "max-test",
             },
+        )
+
+    def test_semantic_router_config_is_optional(self) -> None:
+        handle = tempfile.NamedTemporaryFile("w", suffix=".env", delete=False, encoding="utf-8")
+        handle.write(
+            "CODE_AGENT_ROUTER_BASE_URL=http://127.0.0.1:8770/v1\n"
+            "CODE_AGENT_ROUTER_MODEL=router-test\n"
+            "CODE_AGENT_ROUTER_TIMEOUT_SECONDS=7\n"
+        )
+        handle.close()
+        self.addCleanup(lambda: Path(handle.name).unlink(missing_ok=True))
+
+        with patch.dict(os.environ, {}, clear=True):
+            config = load_semantic_router_config(handle.name)
+
+        self.assertEqual(config.base_url, "http://127.0.0.1:8770/v1")
+        self.assertEqual(config.model, "router-test")
+        self.assertEqual(config.timeout_seconds, 7)
+
+    def test_semantic_router_selects_by_meaning_without_keyword_match(self) -> None:
+        semantic = FakeSemanticRouter("mathematics")
+        flash = FakeModel("qwen3.7-flash")
+        math = FakeModel("qwen-math-plus")
+        router = AutoRoutingModel(
+            {"qwen-flash": flash, "qwen-math": math},
+            semantic_router=semantic,
+        )
+
+        router.complete([{"role": "user", "content": "请帮我处理这个问题"}], [])
+
+        self.assertEqual(router.last_model, "qwen-math-plus")
+        self.assertEqual(router.last_route["routing_strategy"], "semantic+constraints")
+        self.assertEqual(router.last_route["semantic_route"], "mathematics")
+        self.assertEqual(semantic.calls, 1)
+
+    def test_semantic_router_failure_falls_back_and_is_cached_per_turn(self) -> None:
+        semantic = FakeSemanticRouter(error="router offline")
+        flash = FakeModel("qwen3.7-flash")
+        router = AutoRoutingModel({"qwen-flash": flash}, semantic_router=semantic)
+        messages = [{"role": "user", "content": "简单介绍一下这个概念"}]
+
+        router.complete(messages, [])
+        router.complete(messages, [])
+
+        self.assertEqual(router.last_model, "qwen3.7-flash")
+        self.assertEqual(router.last_route["routing_strategy"], "heuristic-fallback")
+        self.assertIn("router offline", router.last_route["router_error"])
+        self.assertEqual(semantic.calls, 1)
+
+    def test_arch_router_accepts_python_style_mapping_output(self) -> None:
+        self.assertEqual(
+            ArchRouterClient._parse_route("{'route': 'routine_code'}"),
+            "routine_code",
         )
 
     def test_failed_qwen_cascades_to_deepseek_and_copies_usage(self) -> None:

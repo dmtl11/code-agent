@@ -89,6 +89,14 @@ class LLMConfig:
     repo_map_chars: int
 
 
+@dataclass(frozen=True)
+class SemanticRouterConfig:
+    base_url: str
+    model: str
+    api_key: str
+    timeout_seconds: int
+
+
 def load_llm_config(
     env_file: str | os.PathLike[str] | None = None,
     provider: str | None = None,
@@ -186,6 +194,24 @@ def load_auto_route_limits(
         "CODE_AGENT_AUTO_BALANCED_MAX_SCORE", values, legacy_balanced, minimum=efficient
     )
     return efficient, balanced
+
+
+def load_semantic_router_config(
+    env_file: str | os.PathLike[str] | None = None,
+) -> SemanticRouterConfig:
+    path = Path(env_file or os.getenv("CODE_AGENT_ENV_FILE") or DEFAULT_ENV_FILE).resolve()
+    values = _read_env_file(path)
+    return SemanticRouterConfig(
+        base_url=_first_nonempty("CODE_AGENT_ROUTER_BASE_URL", values).rstrip("/"),
+        model=(
+            _first_nonempty("CODE_AGENT_ROUTER_MODEL", values)
+            or "katanemo/Arch-Router-1.5B"
+        ),
+        api_key=_first_nonempty("CODE_AGENT_ROUTER_API_KEY", values),
+        timeout_seconds=_read_int(
+            "CODE_AGENT_ROUTER_TIMEOUT_SECONDS", values, 90, minimum=1
+        ),
+    )
 
 
 def _read_int(key: str, values: dict[str, str], default: int, minimum: int) -> int:

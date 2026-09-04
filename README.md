@@ -93,7 +93,7 @@ python run.py --web --host 127.0.0.1 --port 8767
 
 ### 多模型路由：按任务选择，失败时级联
 
-`AutoRoutingModel` 在每次模型请求前读取任务类型、输入长度、上下文规模和近期工具失败，使用可配置阈值区分高效、均衡和高能力档位。
+`AutoRoutingModel` 在每次模型请求前读取任务类型、输入长度、上下文规模和近期工具失败，使用可配置阈值区分高效、均衡和高能力档位。配置可选 Arch-Router 后，任务类型与语义复杂度优先由轻量路由模型判断，本地规则继续负责工具失败升级、上下文约束和故障级联。
 
 | 任务类型 | 首选策略 |
 | --- | --- |
@@ -104,7 +104,28 @@ python run.py --web --host 127.0.0.1 --port 8767
 
 路由器过滤未配置的服务，结合失败次数与冷却标记排序，再逐个尝试候选。候选可包括其他 Qwen 模型、DeepSeek，以及经 CloseAI 接入的 ChatGPT、Claude。冷却用于降低优先级，不是绝对禁止调用；全部候选失败会明确返回错误。
 
-这是一套**启发式规则路由与异常回退机制**，不是训练式分类器，也不是多个模型同时投票。工具失败可影响下一次选择，但目前没有独立模型评审答案质量，不承诺每次都选到最优模型或固定节省比例。
+默认仍使用启发式规则。语义路由器未配置、超时或输出非法时，会自动回退到原有规则，不会阻断编码任务。工具失败可影响下一次选择，但目前没有独立模型评审答案质量，不承诺每次都选到最优模型或固定节省比例。
+
+#### 启用 Arch-Router-1.5B
+
+Arch-Router 作为独立本地进程运行，避免路由模型占用 Agent 主进程的内存。首次启动会从 Hugging Face 下载模型：
+
+```powershell
+python -m venv .venv-router
+.venv-router\Scripts\python -m pip install -e ".[semantic-router]"
+.venv-router\Scripts\code-agent-router --host 127.0.0.1 --port 8770
+```
+
+然后在 `config/llm.env` 中设置：
+
+```dotenv
+CODE_AGENT_ROUTER_BASE_URL=http://127.0.0.1:8770/v1
+CODE_AGENT_ROUTER_MODEL=katanemo/Arch-Router-1.5B
+CODE_AGENT_ROUTER_TIMEOUT_SECONDS=90
+```
+
+本地模型的语义结果在同一用户回合内会被缓存，不会在每个工具步骤重复调用。该模型使用 Katanemo Community License，引入商业项目前需单独核对许可条款。
+没有 GPU 时，1.5B 生成式路由器在 CPU 上可能需要数十秒；适合功能演示，日常使用建议改用 GPU 或 GGUF 量化服务。删除 `CODE_AGENT_ROUTER_BASE_URL` 即可回到纯规则路由。
 
 ![多模型路由示意](docs/architecture-slides/01-model-routing.png)
 

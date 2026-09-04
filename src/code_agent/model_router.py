@@ -5,8 +5,14 @@ import os
 from dataclasses import dataclass, replace
 from typing import Any
 
-from .config import load_auto_route_limits, load_llm_config, load_qwen_auto_models
+from .config import (
+    load_auto_route_limits,
+    load_llm_config,
+    load_qwen_auto_models,
+    load_semantic_router_config,
+)
 from .model import ChatModel, ModelError
+from .semantic_router import ArchRouterClient
 
 
 MODEL_CASCADES = {
@@ -50,6 +56,16 @@ MATH_TERMS = (
     "计算", "证明", "数学", "数列", "极限",
 )
 
+SEMANTIC_ROUTE_DECISIONS = {
+    "simple_general": ("general", "efficient"),
+    "complex_general": ("general", "balanced"),
+    "routine_code": ("code", "efficient"),
+    "complex_code": ("code", "capable"),
+    "mathematics": ("math", "balanced"),
+    "architecture": ("architecture", "capable"),
+}
+STAGE_RANK = {"efficient": 0, "balanced": 1, "capable": 2}
+
 
 @dataclass(frozen=True)
 class RouteDecision:
@@ -59,6 +75,9 @@ class RouteDecision:
     score: int
     reasons: tuple[str, ...]
     candidates: tuple[str, ...]
+    strategy: str
+    semantic_route: str
+    router_error: str
 
 
 class AutoRoutingModel:
@@ -71,7 +90,9 @@ class AutoRoutingModel:
         self,
         models: dict[str, Any] | None = None,
         env_file: str | os.PathLike[str] | None = None,
+        semantic_router: Any | None = None,
     ) -> None:
+        load_configured_router = models is None
         if models is None:
             models = self._load_models(env_file)
         self.models = {
@@ -83,6 +104,13 @@ class AutoRoutingModel:
         self.failure_counts = {target: 0 for target in self.models}
         self.retry_after = {target: 0 for target in self.models}
         self.efficient_max, self.balanced_max = load_auto_route_limits(env_file)
+        router_config = load_semantic_router_config(env_file)
+        self.semantic_router = semantic_router
+        if self.semantic_router is None and router_config.base_url and load_configured_router:
+            self.semantic_router = ArchRouterClient(router_config)
+        self._semantic_cache_key = ""
+        self._semantic_cache_route = ""
+        self._semantic_cache_error = ""
         self.call_count = 0
         self.last_usage: dict[str, int] = {}
         self.last_usage_source = "unavailable"
@@ -145,6 +173,29 @@ class AutoRoutingModel:
             stage = "balanced"
         else:
             stage = "capable"
+
+        semantic_route, router_error = self._semantic_classification(
+            messages, user_text, self._mode(messages)
+        )
+        strategy = "heuristic"
+        if semantic_route:
+            task_type, stage = SEMANTIC_ROUTE_DECISIONS[semantic_route]
+            reasons.insert(0, f"semantic route: {semantic_route}")
+            strategy = "semantic+constraints"
+        elif router_error:
+            reasons.insert(0, "semantic router unavailable; used heuristic fallback")
+            strategy = "heuristic-fallback"
+
+        mode = self._mode(messages)
+        if mode == "architect":
+            task_type = "architecture"
+            stage = "capable"
+        if tool_failures >= 4:
+            stage = "capable"
+        elif tool_failures >= 2:
+            stage = self._max_stage(stage, "balanced")
+        if context_chars // 4 > 16000:
+            stage = self._max_stage(stage, "balanced")
         preferred = self._preferred_target(task_type, stage)
 
         configured = [target for target in MODEL_CASCADES[preferred] if target in self.models]
@@ -157,8 +208,46 @@ class AutoRoutingModel:
         if not reasons:
             reasons.append(f"{task_type} task detected from user input")
         return RouteDecision(
-            preferred, task_type, stage, score, tuple(reasons), tuple(configured)
+            preferred,
+            task_type,
+            stage,
+            score,
+            tuple(reasons),
+            tuple(configured),
+            strategy,
+            semantic_route,
+            router_error,
         )
+
+    def _semantic_classification(
+        self,
+        messages: list[dict[str, Any]],
+        user_text: str,
+        mode: str,
+    ) -> tuple[str, str]:
+        if self.semantic_router is None or mode == "architect":
+            return "", ""
+        cache_key = f"{mode}\n{user_text}"
+        if cache_key == self._semantic_cache_key:
+            return self._semantic_cache_route, self._semantic_cache_error
+        route = ""
+        error = ""
+        try:
+            candidate = str(self.semantic_router.classify(messages) or "")
+            if candidate in SEMANTIC_ROUTE_DECISIONS:
+                route = candidate
+            else:
+                error = f"unsupported route: {candidate!r}"
+        except Exception as exc:
+            error = f"{type(exc).__name__}: {exc}"[:300]
+        self._semantic_cache_key = cache_key
+        self._semantic_cache_route = route
+        self._semantic_cache_error = error
+        return route, error
+
+    @staticmethod
+    def _max_stage(left: str, right: str) -> str:
+        return left if STAGE_RANK[left] >= STAGE_RANK[right] else right
 
     def complete(
         self,
@@ -306,4 +395,7 @@ class AutoRoutingModel:
             ],
             "attempts": list(attempts),
             "fallback_count": len(attempts),
+            "routing_strategy": decision.strategy,
+            "semantic_route": decision.semantic_route,
+            "router_error": decision.router_error,
         }
